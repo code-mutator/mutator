@@ -42,7 +42,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/p/mutator-framework
+      url: https://pypi.org/p/CodeMutator
     permissions:
       id-token: write  # IMPORTANT: mandatory for trusted publishing
 
@@ -63,7 +63,7 @@ jobs:
 
     environment:
       name: testpypi
-      url: https://test.pypi.org/p/mutator-framework
+      url: https://test.pypi.org/p/CodeMutator
 
     permissions:
       id-token: write  # IMPORTANT: mandatory for trusted publishing

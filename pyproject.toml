@@ -3,19 +3,19 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "mutator"
+name = "CodeMutator"
 dynamic = ["version"]
 description = "A comprehensive Python framework for building coding agents using GenAI"
 readme = "README.md"
-license = {text = "MIT"}
+license = {text = "Apache-2.0"}
 authors = [
-    {name = "Mutator Framework Team", email = "info@codemutator.com"},
+    {name = "Mutator SDK Team", email = "info@codemutator.com"},
 ]
 keywords = ["mutator", "agent", "ai", "llm", "framework", "python", "development", "automation"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache-2.0",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.8",
