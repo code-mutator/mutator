@@ -93,7 +93,7 @@ def _validate_regex_pattern(pattern: str) -> Optional[str]:
         return f"Invalid regex pattern: {str(e)}"
 
 
-def _build_tree_structure(directory: Path, max_depth: int = 3, max_children: int = 20, current_depth: int = 0) -> Dict[str, Any]:
+def _build_tree_structure(directory: Path, max_depth: int = 3, max_children: int = 20, current_depth: int = 0, working_directory: Optional[Path] = None) -> Dict[str, Any]:
     """
     Build a tree structure for a directory with depth and children limits.
     
@@ -102,12 +102,16 @@ def _build_tree_structure(directory: Path, max_depth: int = 3, max_children: int
         max_depth: Maximum depth to traverse (default: 3)
         max_children: Maximum children per parent (default: 20)
         current_depth: Current depth in traversal
+        working_directory: Working directory for gitignore checks
         
     Returns:
         Tree structure dictionary
     """
     if current_depth >= max_depth:
         return None
+    
+    if working_directory is None:
+        working_directory = directory
     
     try:
         items = []
@@ -130,7 +134,7 @@ def _build_tree_structure(directory: Path, max_depth: int = 3, max_children: int
                 break
             
             # Skip files/directories that should be excluded by .gitignore
-            if should_exclude_from_search(item):
+            if should_exclude_from_search(item, working_directory):
                 continue
             
             item_info = {
@@ -162,7 +166,7 @@ def _build_tree_structure(directory: Path, max_depth: int = 3, max_children: int
             
             # If it's a directory and we haven't reached max depth, recurse
             if item.is_dir() and current_depth < max_depth - 1:
-                children = _build_tree_structure(item, max_depth, max_children, current_depth + 1)
+                children = _build_tree_structure(item, max_depth, max_children, current_depth + 1, working_directory)
                 if children:
                     item_info["children"] = children
             
@@ -172,71 +176,113 @@ def _build_tree_structure(directory: Path, max_depth: int = 3, max_children: int
         return items
         
     except Exception:
-        # Handle permission errors gracefully
         return None
 
 
 def search_files_by_name(name_pattern: str) -> Dict[str, Any]:
     """
-    <short_description>Search for files by file name, matching a pattern using glob or regex-based name matching.</short_description>
+    <short_description>Search for files by name pattern using glob or regex patterns.</short_description>
     
     <long_description>
-    This tool searches for files by name patterns across your codebase using either glob patterns
-    or regular expressions.
-    It automatically detects the pattern type and provides flexible search.
+    This tool searches for files matching a specific name pattern within the project directory.
+    Supports both glob patterns (*.py, test_*.js) and regex patterns for flexible file discovery.
 
     ## Important Notes
-    1. **Pattern Matching**:
-       - Automatically detects glob patterns (*.py, *system*prompt*, test_*) vs regex patterns
-       - Supports glob patterns like `*.py` for Python files, `*test*` for test files
-       - Supports regex patterns like `.*\\.py$` for advanced matching
 
-    2. **Pattern Types**:
-       - Glob patterns: `*.py`, `*system*prompt*`, `test_*`, `**/*.js`
-       - Regex patterns: `.*\\.py$`, `^test_.*\\.(py|js)$`, `config\\.(json|yaml)$`
+    1. **Pattern Types**:
+       - Glob patterns: Use wildcards like *.py, test_*.js, **/*.md
+       - Regex patterns: Use regex syntax for complex matching
+       - Automatic detection of pattern type based on syntax
+
+    2. **Search Scope**:
+       - Searches recursively through all subdirectories
+       - Respects .gitignore patterns and standard exclusions
+       - Excludes binary files, cache directories, and build artifacts
+
+    3. **Performance**:
+       - Optimized for large codebases
+       - Limits results to prevent overwhelming output
+       - Fast pattern matching using appropriate algorithms
 
     ## Examples
 
-    - Find Python files: `search_files_by_name("*.py")` or `search_files_by_name(r".*\\.py$")`
-    - Find files with "system" and "prompt": `search_files_by_name("*system*prompt*")`
-    - Complex regex pattern: `search_files_by_name(r"test_.*\\.(py|js)$")`
+    - Find Python files: `search_files_by_name("*.py")`
+    - Find test files: `search_files_by_name("test_*.js")`
+    - Find config files: `search_files_by_name("*config*")`
+    - Regex search: `search_files_by_name("^api_.*\\.py$")`
+
+    ## Use Cases
+
+    - Locating specific files in large projects
+    - Finding files by naming conventions
+    - Discovering configuration or documentation files
+    - Identifying test files or build artifacts
     </long_description>
 
     Args:
-        name_pattern: Glob pattern (*.py, *system*prompt*) or regex pattern (.*\\.py$) to match file names
+        name_pattern: File name pattern (glob or regex)
     
     Returns:
-        Dict containing list of matching files with metadata including line counts
+        Dict containing matching files with metadata
     """
     try:
-        # Use current working directory
-        search_path = Path.cwd()
-        if not search_path.exists():
-            return {"error": f"Directory not found: {search_path}"}
+        # Import here to avoid circular imports
+        from ..decorator import get_working_directory
+        
+        # Get the configured working directory
+        search_path = Path(get_working_directory())
         
         matches = []
         
-        # Detect pattern type and prepare matcher
-        is_glob = _is_glob_pattern(name_pattern)
+        # Determine if pattern is glob or regex
+        is_glob = any(char in name_pattern for char in ['*', '?', '[', ']'])
         
         if is_glob:
-            # Use glob/fnmatch for glob patterns
-            def pattern_matches(filename: str) -> bool:
-                return fnmatch.fnmatch(filename.lower(), name_pattern.lower())
-        else:
-            # Use regex for regex patterns
-            regex_error = _validate_regex_pattern(name_pattern)
-            if regex_error:
-                return {"error": regex_error}
-            
-            flags = re.IGNORECASE
+            # Use glob pattern matching
             try:
-                regex_pattern = re.compile(name_pattern, flags)
+                # Handle both simple patterns and recursive patterns
+                if '**' in name_pattern:
+                    pattern_parts = name_pattern.split('**/')
+                    if len(pattern_parts) == 2:
+                        # Pattern like "**/*.py"
+                        for file_path in search_path.rglob(pattern_parts[1]):
+                            if file_path.is_file() and not should_exclude_from_search(file_path, search_path):
+                                matches.append({
+                                    "path": str(file_path.relative_to(search_path)),
+                                    "size": file_path.stat().st_size,
+                                    "line_count": _count_lines_in_file(file_path)
+                                })
+                    else:
+                        # Complex recursive pattern
+                        for file_path in search_path.rglob('*'):
+                            if file_path.is_file() and file_path.match(name_pattern) and not should_exclude_from_search(file_path, search_path):
+                                matches.append({
+                                    "path": str(file_path.relative_to(search_path)),
+                                    "size": file_path.stat().st_size,
+                                    "line_count": _count_lines_in_file(file_path)
+                                })
+                else:
+                    # Simple glob pattern
+                    for file_path in search_path.rglob(name_pattern):
+                        if file_path.is_file() and not should_exclude_from_search(file_path, search_path):
+                            matches.append({
+                                "path": str(file_path.relative_to(search_path)),
+                                "size": file_path.stat().st_size,
+                                "line_count": _count_lines_in_file(file_path)
+                            })
+            except Exception as e:
+                return {"error": f"Glob pattern error: {str(e)}"}
+        else:
+            # Use regex pattern matching
+            import re
+            try:
+                pattern = re.compile(name_pattern)
+                
+                def pattern_matches(filename: str) -> bool:
+                    return bool(pattern.search(filename))
+                
             except re.error as e:
                 return {"error": f"Invalid regex pattern: {str(e)}"}
-            
-            def pattern_matches(filename: str) -> bool:
-                return bool(regex_pattern.search(filename))
         
         # Search function
         def search_in_directory(path: Path):
@@ -341,10 +387,11 @@ def search_files_by_content(content_pattern: str, file_pattern: str = "*", max_r
         Dict containing search results with file paths, line numbers, matching content, and file line counts
     """
     try:
-        # Use current working directory
-        search_path = Path.cwd()
-        if not search_path.exists():
-            return {"error": f"Directory not found: {search_path}"}
+        # Import here to avoid circular imports
+        from ..decorator import get_working_directory
+        
+        # Get the configured working directory
+        search_path = Path(get_working_directory())
         
         matches = []
         
@@ -489,7 +536,20 @@ def list_directory(directory: str = ".", include_tree: bool = True, max_depth: i
         Dict containing directory contents with detailed file information including line counts, metadata, and optional tree structure
     """
     try:
-        dir_path = Path(directory)
+        # Import here to avoid circular imports
+        from ..decorator import get_working_directory
+        
+        # Get the configured working directory
+        working_dir = Path(get_working_directory())
+        
+        # Resolve the target directory relative to working directory
+        if directory == ".":
+            dir_path = working_dir
+        else:
+            dir_path = Path(directory)
+            if not dir_path.is_absolute():
+                dir_path = working_dir / directory
+        
         if not dir_path.exists():
             return {"error": f"Directory not found: {directory}"}
         
@@ -500,7 +560,7 @@ def list_directory(directory: str = ".", include_tree: bool = True, max_depth: i
         
         for item in dir_path.iterdir():
             # Skip files/directories that should be excluded by .gitignore
-            if should_exclude_from_search(item):
+            if should_exclude_from_search(item, working_dir):
                 continue
             
             item_info = {
@@ -535,15 +595,26 @@ def list_directory(directory: str = ".", include_tree: bool = True, max_depth: i
         # Sort by name for consistent output
         items.sort(key=lambda x: x["name"].lower())
         
+        # Create relative path for display
+        try:
+            relative_path = str(dir_path.relative_to(working_dir))
+            if relative_path == ".":
+                display_path = "."
+            else:
+                display_path = relative_path
+        except ValueError:
+            # If path is not relative to working directory, show absolute path
+            display_path = str(dir_path)
+        
         result = {
-            "directory": str(dir_path.relative_to(Path.cwd())) if dir_path.is_absolute() else str(dir_path),
+            "directory": display_path,
             "items": items,
             "total_items": len(items)
         }
         
         # Add tree structure if requested
         if include_tree:
-            tree_structure = _build_tree_structure(dir_path, max_depth, max_children)
+            tree_structure = _build_tree_structure(dir_path, max_depth, max_children, working_directory=working_dir)
             if tree_structure:
                 result["tree"] = tree_structure
                 result["tree_config"] = {

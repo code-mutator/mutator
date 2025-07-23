@@ -84,7 +84,9 @@ async def delegate_task(task_description: str, expected_output: str, context_dat
         
         # Create sub-agent configuration
         config = AgentConfig()
-        config.working_directory = str(Path.cwd())
+        # Import here to avoid circular imports
+        from ..decorator import get_working_directory
+        config.working_directory = get_working_directory()
         
         # Create and initialize the sub-agent
         sub_agent = Mutator(config)

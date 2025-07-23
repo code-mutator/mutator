@@ -178,7 +178,7 @@ class ToolManager:
         
         builtin_tools = get_builtin_tools()
         for tool_name, tool in builtin_tools.items():
-            self.register_tool(tool)
+            self.register_function(tool)
     
     def unregister_tool(self, tool_name: str) -> bool:
         """Unregister a tool."""
@@ -338,8 +338,17 @@ class ToolManager:
                         safety_checks=safety_checks
                     )
             
-            # Execute the tool
-            result = await tool.execute(**tool_arguments)
+            # Set tool context for @tool functions
+            from .decorator import set_tool_context, clear_tool_context, ToolContext
+            context = ToolContext(working_directory=self.working_directory, tool_manager=self)
+            set_tool_context(context)
+            
+            try:
+                # Execute the tool
+                result = await tool.execute(**tool_arguments)
+            finally:
+                # Always clear context after execution
+                clear_tool_context()
             
             # Normalize paths in the result
             if result.success and result.result:
@@ -350,29 +359,24 @@ class ToolManager:
             result.execution_time = execution_time
             result.safety_checks = safety_checks
             
-            # Log structured output
+            # Update success stats
             if result.success:
                 self.execution_stats[tool_name]["successful_calls"] += 1
-                # Format output for logging
-                if result.result is not None:
-                    # Truncate very long results for readability
-                    if isinstance(result.result, str) and len(result.result) > 500:
-                        display_result = result.result[:500] + "..."
-                    elif isinstance(result.result, dict):
-                        display_result = str(result.result)[:500] + "..." if len(str(result.result)) > 500 else result.result
-                    else:
-                        display_result = result.result
-                    self.logger.info(f"Output: {display_result}")
-                else:
-                    self.logger.info("Output: None")
             else:
                 self.execution_stats[tool_name]["failed_calls"] += 1
-                self.logger.error(f"Output: {result.error}")
             
             self.execution_stats[tool_name]["total_execution_time"] += execution_time
+            
+            # Update average execution time
             total_calls = self.execution_stats[tool_name]["total_calls"]
             total_time = self.execution_stats[tool_name]["total_execution_time"]
             self.execution_stats[tool_name]["average_execution_time"] = total_time / total_calls
+            
+            # Log result
+            if result.success:
+                self.logger.info(f"Output: Tool executed successfully")
+            else:
+                self.logger.error(f"Output: {result.error}")
             
             return result
             

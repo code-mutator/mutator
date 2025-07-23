@@ -7,10 +7,53 @@ from function signatures and docstrings.
 
 import asyncio
 import inspect
-from typing import Any, Callable, Dict
+import threading
+from typing import Any, Callable, Dict, Optional
+from pathlib import Path
 
 from ..core.types import ToolResult
 from .schema_generator import SchemaGenerator
+
+
+# Thread-local storage for tool execution context
+_tool_context = threading.local()
+
+
+class ToolContext:
+    """Context information available to tool functions during execution."""
+    
+    def __init__(self, working_directory: str, tool_manager: Optional[Any] = None):
+        self.working_directory = working_directory
+        self.tool_manager = tool_manager
+
+
+def get_tool_context() -> Optional[ToolContext]:
+    """Get the current tool execution context."""
+    return getattr(_tool_context, 'context', None)
+
+
+def set_tool_context(context: ToolContext) -> None:
+    """Set the current tool execution context."""
+    _tool_context.context = context
+
+
+def clear_tool_context() -> None:
+    """Clear the current tool execution context."""
+    if hasattr(_tool_context, 'context'):
+        delattr(_tool_context, 'context')
+
+
+def get_working_directory() -> str:
+    """
+    Get the working directory for the current tool execution.
+    
+    Returns the configured working directory from ToolManager if available,
+    otherwise falls back to current working directory.
+    """
+    context = get_tool_context()
+    if context and context.working_directory:
+        return context.working_directory
+    return str(Path.cwd())
 
 
 class SimpleTool:

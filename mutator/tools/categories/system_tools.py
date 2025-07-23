@@ -141,7 +141,9 @@ async def run_shell(command: str, timeout: int = 30) -> Dict[str, Any]:
                 raise ValueError(f"Command rejected for safety: {command}")
         
         # Get current working directory
-        working_directory = os.getcwd()
+        # Import here to avoid circular imports
+        from ..decorator import get_working_directory
+        working_directory = get_working_directory()
         
         result = subprocess.run(
             command,

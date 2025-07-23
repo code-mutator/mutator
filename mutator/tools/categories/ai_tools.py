@@ -75,8 +75,11 @@ def search_files_sementic(query: str, file_types: List[str] = None, max_results:
         Dict containing search results with file paths, line numbers, code snippets, and file line counts
     """
     try:
-        # Auto-detect current working directory
-        current_dir = Path.cwd()
+        # Import here to avoid circular imports
+        from ..decorator import get_working_directory
+        
+        # Get the configured working directory
+        current_dir = Path(get_working_directory())
         
         # Default file types if not specified
         if file_types is None:
@@ -196,7 +199,7 @@ def _search_file_content(file_path: Path, search_terms: List[str], original_quer
             function_class_name = _detect_function_class_name(lines, line_num - 1)
             
             result = {
-                "file": str(file_path.relative_to(Path.cwd())),
+                "file": str(file_path.relative_to(current_dir)),
                 "line_number": line_num,
                 "line_content": line.strip(),
                 "relevance_score": relevance_score,
