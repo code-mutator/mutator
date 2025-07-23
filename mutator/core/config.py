@@ -10,6 +10,7 @@ import os
 import json
 import yaml
 import toml
+import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union, Type
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -60,8 +61,13 @@ class LLMConfig(BaseModel):
     provider: LLMProvider = LLMProvider.OPENAI
     model: str = "gpt-4.1-mini"
     api_key: Optional[str] = None
-    api_base: Optional[str] = None
-    base_url: Optional[str] = None  # Added to match tests
+    
+    # Consolidated base URL parameter for all providers
+    base_url: Optional[str] = None
+    
+    # Deprecated - kept for backward compatibility
+    api_base: Optional[str] = Field(None, deprecated=True, description="Deprecated: Use base_url instead")
+    
     api_version: Optional[str] = None
     max_tokens: int = 2000  # Changed from 4000 to 2000 to match tests
     temperature: float = 0.1
@@ -93,9 +99,28 @@ class LLMConfig(BaseModel):
     # Custom headers for requests
     custom_headers: Optional[Dict[str, str]] = None
     
-    # System prompt settings
-    system_prompt: Optional[str] = None
-    disable_system_prompt: bool = False
+    @model_validator(mode='after')
+    def _handle_base_url_consolidation(self):
+        """Handle consolidation of api_base and base_url parameters."""
+        # If both are provided, warn and prefer base_url
+        if self.api_base is not None and self.base_url is not None:
+            warnings.warn(
+                "Both 'api_base' and 'base_url' are provided. Using 'base_url' and ignoring 'api_base'. "
+                "The 'api_base' parameter is deprecated, please use 'base_url' instead.",
+                DeprecationWarning,
+                stacklevel=2
+            )
+        # If only api_base is provided, copy to base_url and warn
+        elif self.api_base is not None and self.base_url is None:
+            warnings.warn(
+                "The 'api_base' parameter is deprecated and will be removed in a future version. "
+                "Please use 'base_url' instead.",
+                DeprecationWarning,
+                stacklevel=2
+            )
+            self.base_url = self.api_base
+        
+        return self
     
     @model_validator(mode='after')
     def _check_api_key(self):

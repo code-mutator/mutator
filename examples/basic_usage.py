@@ -36,7 +36,9 @@ async def example_basic_configuration():
             llm_config=LLMConfig(
                 model="gpt-3.5-turbo",
                 max_tokens=1000,
-                temperature=0.2
+                temperature=0.2,
+                # Example of using base_url for custom endpoints
+                # base_url="https://api.example.com/v1"
             ),
             context_config=ContextConfig(
                 project_path=".",

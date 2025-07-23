@@ -62,17 +62,36 @@ class LLMClient:
             elif self.config.provider.value == "google":
                 os.environ["GOOGLE_API_KEY"] = self.config.api_key
         
-        # Set up Azure specific configurations
-        if self.config.provider.value == "azure":
-            if hasattr(self.config, 'azure_endpoint') and self.config.azure_endpoint:
-                os.environ["AZURE_API_BASE"] = self.config.azure_endpoint
-            elif self.config.api_base:
-                os.environ["AZURE_API_BASE"] = self.config.api_base
+        # Set up base URL configurations for all providers
+        if self.config.base_url:
+            provider = self.config.provider.value
             
-            if hasattr(self.config, 'azure_deployment') and self.config.azure_deployment:
-                os.environ["AZURE_API_VERSION"] = self.config.azure_deployment
-            elif self.config.api_version:
-                os.environ["AZURE_API_VERSION"] = self.config.api_version
+            if provider == "azure":
+                # Azure uses AZURE_API_BASE
+                os.environ["AZURE_API_BASE"] = self.config.base_url
+            elif provider == "openai":
+                # OpenAI uses OPENAI_API_BASE
+                os.environ["OPENAI_API_BASE"] = self.config.base_url
+            elif provider == "anthropic":
+                # Anthropic uses ANTHROPIC_API_BASE
+                os.environ["ANTHROPIC_API_BASE"] = self.config.base_url
+            elif provider == "google":
+                # Google uses GOOGLE_API_BASE
+                os.environ["GOOGLE_API_BASE"] = self.config.base_url
+            elif provider == "huggingface":
+                # HuggingFace uses HUGGINGFACE_API_BASE
+                os.environ["HUGGINGFACE_API_BASE"] = self.config.base_url
+            elif provider == "ollama":
+                # Ollama uses OLLAMA_API_BASE
+                os.environ["OLLAMA_API_BASE"] = self.config.base_url
+            elif provider == "custom":
+                # For custom providers, we'll pass it directly in the API call
+                # but also set a generic API_BASE for compatibility
+                os.environ["API_BASE"] = self.config.base_url
+        
+        # Set up Azure API version if provided
+        if self.config.provider.value == "azure" and self.config.api_version:
+            os.environ["AZURE_API_VERSION"] = self.config.api_version
         
         # Configure litellm settings
         litellm.set_verbose = self.config.debug
@@ -161,6 +180,10 @@ class LLMClient:
                     "max_tokens": kwargs.get("max_tokens", self.config.max_tokens),
                     "timeout": kwargs.get("timeout", self.config.timeout),
                 }
+                
+                # Add base_url if configured (especially important for custom providers)
+                if self.config.base_url:
+                    params["api_base"] = self.config.base_url
                 
                 # Add provider-specific parameters
                 self._add_provider_specific_params(params, kwargs)
@@ -614,6 +637,10 @@ class LLMClient:
                     "stream": True,
                     "timeout": self.config.timeout,
                 }
+                
+                # Add base_url if configured
+                if self.config.base_url:
+                    params["api_base"] = self.config.base_url
                 
                 # Add function schemas if available - use tools format for OpenAI (functions deprecated)
                 if self._function_schemas:

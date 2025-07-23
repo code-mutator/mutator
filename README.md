@@ -232,7 +232,7 @@ mutator config show my_config.json
     "provider": "azure",
     "model": "gpt-4",
     "api_key": "your-azure-api-key",
-    "azure_endpoint": "https://your-resource.openai.azure.com/",
+    "base_url": "https://your-resource.openai.azure.com/",
     "api_version": "2023-05-15",
     "max_tokens": 4000,
     "temperature": 0.1
