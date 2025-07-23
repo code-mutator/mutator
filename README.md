@@ -27,7 +27,7 @@ A comprehensive Python framework for building AI-powered coding agents that can 
 ## Installation
 
 ```bash
-pip install mutator
+pip install CodeMutator
 ```
 
 ### Development Installation
