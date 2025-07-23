@@ -1,0 +1,65 @@
+name: Auto Version Bump
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  bump-version:
+    runs-on: ubuntu-latest
+    if: "!contains(github.event.release.tag_name, 'dev') && !contains(github.event.release.tag_name, 'alpha') && !contains(github.event.release.tag_name, 'beta')"
+    
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        token: ${{ secrets.GITHUB_TOKEN }}
+        ref: main
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.x"
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install bump2version
+    
+    - name: Configure Git
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+    
+    - name: Extract version from release tag
+      id: extract_version
+      run: |
+        # Remove 'v' prefix from tag name to get version
+        RELEASE_VERSION="${{ github.event.release.tag_name }}"
+        VERSION="${RELEASE_VERSION#v}"
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        
+        # Update .bumpversion.cfg to match the released version
+        sed -i "s/current_version = .*/current_version = $VERSION/" .bumpversion.cfg
+        
+        # Update __version__.py to match the released version  
+        sed -i "s/__version__ = \".*\"/__version__ = \"$VERSION\"/" mutator/__version__.py
+        
+        # Commit the sync
+        git add .bumpversion.cfg mutator/__version__.py
+        git commit -m "Sync version to released $VERSION" || true
+    
+    - name: Bump to next development version
+      run: |
+        # Bump to next patch version for development
+        bump2version patch --message "Bump version to {new_version} for development"
+    
+    - name: Push changes
+      run: |
+        git push origin main
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
