@@ -129,6 +129,20 @@ class TestLLMConfig:
         # Test setting to False explicitly
         config = LLMConfig(model="gpt-4", disable_system_prompt=False)
         assert config.disable_system_prompt is False
+    
+    def test_llm_config_disable_tool_role(self):
+        """Test LLMConfig disable_tool_role parameter."""
+        # Test default value
+        config = LLMConfig(model="gpt-4")
+        assert config.disable_tool_role is False
+        
+        # Test setting to True
+        config = LLMConfig(model="gpt-4", disable_tool_role=True)
+        assert config.disable_tool_role is True
+        
+        # Test setting to False explicitly
+        config = LLMConfig(model="gpt-4", disable_tool_role=False)
+        assert config.disable_tool_role is False
 
 
 class TestLLMClientSystemPrompt:
@@ -214,6 +228,111 @@ class TestLLMClientSystemPrompt:
         assert len(messages) == 1
         assert messages[0]["role"] == "user"
         assert messages[0]["content"] == "Hello"
+
+
+class TestLLMClientToolRole:
+    """Test LLMClient tool role handling."""
+    
+    def test_tool_role_enabled(self):
+        """Test normal tool role behavior when enabled."""
+        config = LLMConfig(
+            model="gpt-4",
+            disable_tool_role=False
+        )
+        client = LLMClient(config)
+        
+        # Test tool message handling
+        tool_messages = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "I'll help you", "tool_calls": [{"id": "call_123", "name": "test_tool", "arguments": {}}]},
+            {"role": "tool", "content": "Tool result content", "tool_call_id": "call_123"}
+        ]
+        
+        prepared_messages = client._prepare_messages(tool_messages)
+        
+        # Should preserve tool message as-is
+        assert len(prepared_messages) == 3
+        assert prepared_messages[0]["role"] == "user"
+        assert prepared_messages[1]["role"] == "assistant"
+        assert prepared_messages[2]["role"] == "tool"
+        assert prepared_messages[2]["content"] == "Tool result content"
+        assert prepared_messages[2]["tool_call_id"] == "call_123"
+    
+    def test_tool_role_disabled(self):
+        """Test tool role behavior when disabled."""
+        config = LLMConfig(
+            model="gpt-4",
+            disable_tool_role=True
+        )
+        client = LLMClient(config)
+        
+        # Test tool message handling
+        tool_messages = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "I'll help you", "tool_calls": [{"id": "call_123", "name": "test_tool", "arguments": {}}]},
+            {"role": "tool", "content": "Tool result content", "tool_call_id": "call_123"}
+        ]
+        
+        prepared_messages = client._prepare_messages(tool_messages)
+        
+        # Should convert tool message to user message with prefix
+        assert len(prepared_messages) == 3
+        assert prepared_messages[0]["role"] == "user"
+        assert prepared_messages[1]["role"] == "assistant"
+        assert prepared_messages[2]["role"] == "user"
+        assert "Tool result for call_id call_123: Tool result content" in prepared_messages[2]["content"]
+        assert "tool_call_id" not in prepared_messages[2]
+    
+    def test_tool_role_disabled_with_missing_call_id(self):
+        """Test tool role disabled with missing tool_call_id."""
+        config = LLMConfig(
+            model="gpt-4",
+            disable_tool_role=True
+        )
+        client = LLMClient(config)
+        
+        # Test tool message without tool_call_id
+        tool_messages = [
+            {"role": "tool", "content": "Tool result content"}
+        ]
+        
+        prepared_messages = client._prepare_messages(tool_messages)
+        
+        # Should convert tool message to user message with "unknown" call_id
+        assert len(prepared_messages) == 1
+        assert prepared_messages[0]["role"] == "user"
+        assert "Tool result for call_id unknown: Tool result content" in prepared_messages[0]["content"]
+    
+    def test_both_system_and_tool_role_disabled(self):
+        """Test behavior when both disable_system_prompt and disable_tool_role are True."""
+        config = LLMConfig(
+            model="gpt-4",
+            disable_system_prompt=True,
+            disable_tool_role=True
+        )
+        client = LLMClient(config)
+        
+        # Test mixed messages
+        mixed_messages = [
+            {"role": "system", "content": "System instructions"},
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "I'll help you", "tool_calls": [{"id": "call_456", "name": "test_tool", "arguments": {}}]},
+            {"role": "tool", "content": "Tool result", "tool_call_id": "call_456"}
+        ]
+        
+        prepared_messages = client._prepare_messages(mixed_messages)
+        
+        # All messages should be converted to user messages
+        assert len(prepared_messages) == 4
+        assert all(msg["role"] == "user" for msg in [prepared_messages[0], prepared_messages[3]])
+        assert prepared_messages[1]["role"] == "user"  # original user message
+        assert prepared_messages[2]["role"] == "assistant"  # assistant message unchanged
+        
+        # Check system message conversion
+        assert "System instructions: System instructions" in prepared_messages[0]["content"]
+        
+        # Check tool message conversion
+        assert "Tool result for call_id call_456: Tool result" in prepared_messages[3]["content"]
 
 
 class TestContextConfig:
@@ -434,7 +553,7 @@ class TestAgentConfig:
         config = AgentConfig()
         
         # Should not raise any validation errors
-        assert config.llm_config.model == "gpt-4-turbo-preview"
+        assert config.llm_config.model == "gpt-4.1-mini"
         assert config.context_config.project_path == "."
     
     def test_agent_config_with_custom_configs(self):

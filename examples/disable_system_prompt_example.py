@@ -7,10 +7,11 @@ for LLM providers that don't support system prompts. When enabled,
 system messages are converted to user messages.
 """
 
+import asyncio
 from mutator import AgentConfig, LLMConfig, Mutator
 
 
-def main():
+async def main():
     """Demonstrate disable_system_prompt usage."""
     
     # Example 1: Normal system prompt behavior (default)
@@ -25,6 +26,7 @@ def main():
     )
     
     agent_normal = Mutator(config_normal)
+    await agent_normal.initialize()
     
     # This will use system messages normally
     print(f"System prompt disabled: {config_normal.llm_config.disable_system_prompt}")
@@ -43,6 +45,7 @@ def main():
     )
     
     agent_disabled = Mutator(config_disabled)
+    await agent_disabled.initialize()
     
     # This will convert system messages to user messages
     print(f"System prompt disabled: {config_disabled.llm_config.disable_system_prompt}")
@@ -104,4 +107,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main() 
+    asyncio.run(main()) 

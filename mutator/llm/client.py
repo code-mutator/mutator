@@ -148,6 +148,15 @@ class LLMClient:
                     "role": "user",
                     "content": f"System instructions: {message['content']}"
                 })
+            # Handle disable_tool_role
+            elif message.get("role") == "tool" and self.config.disable_tool_role:
+                # Convert tool message to user message with tool_call_id prefix
+                tool_call_id = message.get("tool_call_id", "unknown")
+                content = message.get("content", "")
+                prepared_messages.append({
+                    "role": "user",
+                    "content": f"Tool result for call_id {tool_call_id}: {content}"
+                })
             else:
                 prepared_messages.append(message)
         

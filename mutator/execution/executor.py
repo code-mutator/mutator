@@ -118,12 +118,19 @@ class CustomLangChainModel(BaseChatModel):
                 else:
                     formatted_messages.append({"role": "system", "content": msg.content})
             elif isinstance(msg, ToolMessage):
-                # Convert tool message to our format
-                formatted_messages.append({
-                    "role": "tool",
-                    "content": msg.content,
-                    "tool_call_id": msg.tool_call_id
-                })
+                # Handle disable_tool_role: convert tool message to user message with prefix
+                if self.config.llm_config.disable_tool_role:
+                    formatted_messages.append({
+                        "role": "user",
+                        "content": f"Tool result for call_id {msg.tool_call_id}: {msg.content}"
+                    })
+                else:
+                    # Convert tool message to our format
+                    formatted_messages.append({
+                        "role": "tool",
+                        "content": msg.content,
+                        "tool_call_id": msg.tool_call_id
+                    })
         
         # Call our LLM client
         response = await self.llm_client.complete_with_messages(formatted_messages)

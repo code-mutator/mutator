@@ -93,6 +93,9 @@ class LLMConfig(BaseModel):
     # System prompt handling
     disable_system_prompt: bool = False  # When True, system messages are converted to user messages
     
+    # Tool role handling
+    disable_tool_role: bool = False  # When True, tool messages are converted to user messages with tool_call_id prefix
+    
     # Debug settings
     debug: bool = False
     
