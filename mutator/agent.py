@@ -68,6 +68,7 @@ class Mutator:
         # Initialize tool manager
         self.tool_manager = ToolManager(
             disabled_tools=self.config.disabled_tools,
+            working_directory=self.config.working_directory,
             config=self.config
         )
         
