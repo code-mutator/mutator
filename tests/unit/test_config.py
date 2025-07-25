@@ -734,3 +734,89 @@ class TestConfigManager:
             # Clean up
             if "TEST_API_KEY" in os.environ:
                 del os.environ["TEST_API_KEY"] 
+
+
+def test_timeout_configuration_propagation():
+    """Test that AgentConfig timeout is properly propagated to LLMConfig."""
+    # Create AgentConfig with custom timeout
+    config = AgentConfig(timeout=120)
+    
+    # The LLMConfig should inherit the timeout from AgentConfig
+    # This test will currently fail because the timeout is not propagated
+    assert config.llm_config.timeout == 120, f"Expected LLMConfig timeout to be 120, but got {config.llm_config.timeout}"
+
+
+def test_explicit_llm_timeout_overrides_agent_timeout():
+    """Test that explicit LLMConfig timeout overrides AgentConfig timeout."""
+    # Create AgentConfig with custom timeout and explicit LLM config
+    llm_config = LLMConfig(timeout=90)
+    config = AgentConfig(timeout=120, llm_config=llm_config)
+    
+    # The explicit LLMConfig timeout should take precedence
+    assert config.llm_config.timeout == 90, f"Expected LLMConfig timeout to be 90, but got {config.llm_config.timeout}"
+
+
+def test_execution_config_timeout_separate_from_llm_timeout():
+    """Test that ExecutionConfig timeout is separate from LLMConfig timeout."""
+    config = AgentConfig(timeout=180)
+    
+    # ExecutionConfig should use the AgentConfig timeout
+    assert config.execution_config.timeout == 180, f"Expected ExecutionConfig timeout to be 180, but got {config.execution_config.timeout}"
+    
+    # LLMConfig should also use the AgentConfig timeout (after fix)
+    # This will fail until we implement the fix
+    assert config.llm_config.timeout == 180, f"Expected LLMConfig timeout to be 180, but got {config.llm_config.timeout}" 
+
+
+def test_timeout_integration_with_llm_client():
+    """Test that timeout configuration properly integrates with LLMClient."""
+    # Create AgentConfig with custom timeout
+    config = AgentConfig(timeout=150)
+    
+    # Verify the timeout was propagated to LLMConfig
+    assert config.llm_config.timeout == 150
+    
+    # Create LLMClient and verify it uses the correct timeout
+    from mutator.llm.client import LLMClient
+    llm_client = LLMClient(config.llm_config)
+    
+    # The client should have the propagated timeout
+    assert llm_client.config.timeout == 150
+
+
+def test_timeout_configuration_edge_cases():
+    """Test edge cases for timeout configuration."""
+    # Test with default timeout (should not propagate)
+    config1 = AgentConfig()  # Uses default timeout=300
+    assert config1.llm_config.timeout == 60  # Should keep LLM default since agent uses default
+    
+    # Test with explicit zero timeout (should not propagate as it would be invalid)
+    config2 = AgentConfig(timeout=0)  # Invalid but let's see what happens
+    # This might fail validation, but if it doesn't, it shouldn't propagate
+    
+    # Test with very small timeout
+    config3 = AgentConfig(timeout=1)
+    assert config3.llm_config.timeout == 1  # Should propagate even small values
+    
+    # Test with very large timeout
+    config4 = AgentConfig(timeout=3600)  # 1 hour
+    assert config4.llm_config.timeout == 3600  # Should propagate large values
+
+
+def test_timeout_configuration_with_mixed_explicit_configs():
+    """Test timeout configuration when some configs are explicitly provided."""
+    # Explicit LLM config with custom timeout should not be overridden
+    llm_config = LLMConfig(timeout=45)
+    execution_config = ExecutionConfig()  # Uses default timeout=300
+    
+    config = AgentConfig(
+        timeout=200,
+        llm_config=llm_config,
+        execution_config=execution_config
+    )
+    
+    # LLM config should keep its explicit timeout
+    assert config.llm_config.timeout == 45
+    
+    # Execution config should get the agent timeout since it has default
+    assert config.execution_config.timeout == 200 

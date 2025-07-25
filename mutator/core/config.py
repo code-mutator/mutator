@@ -516,6 +516,19 @@ class AgentConfig(BaseSettings):
                 values['mcp_server_configs'] = values.pop('mcp_servers')
         return values
     
+    def model_post_init(self, __context) -> None:
+        """Post-initialization to propagate timeout settings."""
+        # If timeout is set at agent level and sub-configs don't have explicit timeout,
+        # propagate the agent timeout to them
+        if hasattr(self, 'timeout') and self.timeout != 300:  # 300 is the default
+            # Propagate to LLM config if it has default timeout
+            if self.llm_config.timeout == 60:  # 60 is LLMConfig default
+                self.llm_config.timeout = self.timeout
+            
+            # Propagate to execution config if it has default timeout
+            if self.execution_config.timeout == 300:  # 300 is ExecutionConfig default
+                self.execution_config.timeout = self.timeout
+    
     def to_dict(self) -> Dict[str, Any]:
         """Convert configuration to dictionary."""
         return self.model_dump()

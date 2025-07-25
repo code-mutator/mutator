@@ -146,3 +146,4 @@ cli_history.json
 cli_history.txt
 vector_store
 vector_store/
+test_vector_store/

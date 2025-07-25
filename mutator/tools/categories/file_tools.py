@@ -7,11 +7,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
-    from ..decorator import tool
+    from ..decorator import tool, get_working_directory
 except ImportError:
     # Fallback for testing
     def tool(func):
         return func
+    def get_working_directory():
+        return str(Path.cwd())
 
 # Import indentation fixing functionality
 from .indentation_fixer import fix_indentation
@@ -85,7 +87,12 @@ def read_file(file_path: str, line_number: int = 1, lines_before: int = 100, lin
         Dict containing file snippet with line numbers, metadata, and analysis information
     """
     try:
+        # Handle relative paths by combining with working directory
         path = Path(file_path)
+        if not path.is_absolute():
+            working_dir = Path(get_working_directory())
+            path = working_dir / file_path
+            
         if not path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
         
@@ -196,7 +203,12 @@ def edit_file(file_path: str, start_line_inclusive: int, end_line_exclusive: int
         Dict containing edit result and metadata
     """
     try:
+        # Handle relative paths by combining with working directory
         path = Path(file_path)
+        if not path.is_absolute():
+            working_dir = Path(get_working_directory())
+            path = working_dir / file_path
+            
         if not path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
         
@@ -337,7 +349,11 @@ def create_file(file_path: str, full_content: str = "") -> Dict[str, Any]:
         Dict containing creation result and metadata
     """
     try:
+        # Handle relative paths by combining with working directory
         path = Path(file_path)
+        if not path.is_absolute():
+            working_dir = Path(get_working_directory())
+            path = working_dir / file_path
         
         # Create parent directories
         path.parent.mkdir(parents=True, exist_ok=True)

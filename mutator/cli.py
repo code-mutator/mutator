@@ -301,221 +301,193 @@ def chat(
 
 
 async def _chat_single_async(message: str, project_path: Optional[str], config_file: Optional[str], model: Optional[str], provider: Optional[str], verbose: bool, execution_mode: ExecutionMode):
-    """Handle single chat message."""
+    """Execute a single chat message with enhanced error handling."""
     
     try:
-        # Create agent
-        config = None
-        if config_file:
-            config = ConfigManager.load_config(config_file)
-        
-        # Override model and provider if provided
-        config = _update_config_with_overrides(config, model, provider)
-        
-        # Enable debug mode if verbose
-        if verbose:
-            if not config:
-                config = AgentConfig()
-            config.debug = True
-            config.logging_level = "DEBUG"
-            # Set up debug logging
-            import logging
-            logging.getLogger("mutator_framework").setLevel(logging.DEBUG)
-            console.print(f"[dim]Debug mode enabled - Model: {config.llm_config.model}, Provider: {config.llm_config.provider}[/dim]")
-        
-        agent = await create_agent(project_path=project_path, config=config)
-        
-        # Show additional debug info
-        if verbose:
-            tools = agent.get_available_tools()
-            console.print(f"[dim]Available tools: {len(tools)}[/dim]")
-            console.print(f"[dim]Function calling enabled: {config.llm_config.function_calling}[/dim]")
+        # Initialize agent with error handling
+        try:
+            # Create config first
+            config = None
+            if config_file:
+                config = ConfigManager.load_config(config_file)
             
-            # Show system prompt in verbose mode
-            try:
-                # Get the system prompt from the executor
-                system_prompt = agent.executor._create_system_message()
-                console.print(f"[dim]System prompt length: {len(system_prompt)} characters[/dim]")
-                console.print("[dim]System prompt preview:[/dim]")
-                # Show first 200 characters of system prompt
-                preview = system_prompt[:200] + "..." if len(system_prompt) > 200 else system_prompt
-                console.print(Panel(f"[dim]{preview}[/dim]", title="System Prompt Preview", border_style="dim"))
-            except Exception as e:
-                console.print(f"[dim]Could not display system prompt: {e}[/dim]")
+            # Override model and provider if provided
+            config = _update_config_with_overrides(config, model, provider)
+            
+            # Enable debug mode if verbose
+            if verbose:
+                if not config:
+                    config = AgentConfig()
+                config.debug = True
+                config.logging_level = "DEBUG"
+                # Set up debug logging
+                import logging
+                logging.getLogger("mutator_framework").setLevel(logging.DEBUG)
+            
+            agent = await create_agent(project_path=project_path, config=config)
+        except Exception as init_error:
+            console.print(f"[red]Failed to initialize agent: {str(init_error)}[/red]")
+            if verbose:
+                import traceback
+                console.print(f"[dim]Initialization error traceback:\n{traceback.format_exc()}[/dim]")
+            raise typer.Exit(1)
         
-        # Get response from agent using interactive chat (read-only mode)
+        # Show agent info if verbose
+        if verbose:
+            console.print(f"[dim]Agent initialized successfully[/dim]")
+            console.print(f"[dim]Working directory: {agent.config.working_directory}[/dim]")
+            console.print(f"[dim]Model: {agent.config.llm_config.model}[/dim]")
+            console.print(f"[dim]Provider: {agent.config.llm_config.provider}[/dim]")
+            console.print(f"[dim]Execution mode: {execution_mode.value}[/dim]")
+        
+        # Start with thinking spinner immediately
         with Progress(
             SpinnerColumn(),
             TextColumn("[bold blue]Thinking..."),
             console=console,
             transient=False
         ) as progress:
-            task = progress.add_task("Processing", total=None)
+            progress.add_task("thinking", total=None)
             
+            # Execute task with comprehensive error handling
             final_response = ""
+            warnings_shown = False
+            execution_completed = False
             tool_calls_made = False
-            warnings_shown = []
+            last_error = None
             
-            # Always use interactive_chat for chat command (read-only)
-            async for event in agent.interactive_chat(message):
-                # Show debug events if verbose
-                if verbose and event.event_type not in ["tool_call_started", "tool_call_completed", "llm_response", "warning", "task_failed"]:
-                    console.print(f"[dim]DEBUG: {event.event_type} - {event.data}[/dim]")
-                
-                if event.event_type == "tool_call_started":
-                    # Stop thinking and show tool execution
-                    progress.stop()
-                    tool_calls_made = True
-                    tool_name = event.data.get("tool_name", "unknown")
-                    
-                    # Show tool execution clearly
-                    console.print(f"\n[bold blue]🔧 Using tool: {tool_name}[/bold blue]")
-                    
-                    # Show tool parameters if available
-                    if "parameters" in event.data:
-                        params = event.data["parameters"]
-                        if params:
-                            console.print(f"[dim]   Parameters: {params}[/dim]")
-                
-                elif event.event_type == "tool_call_completed":
-                    tool_name = event.data.get("tool_name", "unknown")
-                    success = event.data.get("success", False)
-                    execution_time = event.data.get("execution_time", 0)
-                    
-                    if success:
-                        console.print(f"[green]✅ Tool {tool_name} completed ({execution_time:.2f}s)[/green]")
-                    else:
-                        error = event.data.get("error", "Unknown error")
-                        console.print(f"[red]❌ Tool {tool_name} failed: {error}[/red]")
-                
-                elif event.event_type == "warning":
-                    # Handle new warning events
-                    progress.stop()
-                    warning_msg = event.data.get("message", "Unknown warning")
-                    response_content = event.data.get("response_content", "")
-                    model_name = event.data.get("model", "unknown")
-                    function_calling_enabled = event.data.get("function_calling_enabled", False)
-                    available_tools = event.data.get("available_tools", [])
-                    
-                    console.print(f"\n[bold yellow]⚠️  Configuration Warning[/bold yellow]")
-                    console.print(Panel(
-                        f"[yellow]{warning_msg}[/yellow]",
-                        title="Function Calling Issue",
-                        border_style="yellow"
-                    ))
-                    
-                    # Show diagnostic information
-                    console.print("\n[yellow]🔍 Diagnostic Information:[/yellow]")
-                    console.print(f"• Model: {model_name}")
-                    console.print(f"• Function calling enabled: {function_calling_enabled}")
-                    console.print(f"• Available tools: {len(available_tools)}")
-                    
-                    if available_tools:
-                        console.print(f"• Tool names: {', '.join(available_tools[:5])}{'...' if len(available_tools) > 5 else ''}")
-                    
-                    # Show LLM response preview
-                    if response_content:
-                        preview = response_content[:200] + "..." if len(response_content) > 200 else response_content
-                        console.print(f"• LLM response preview: \"{preview}\"")
-                    
-                    # Provide troubleshooting tips
-                    console.print("\n[yellow]💡 Troubleshooting Tips:[/yellow]")
-                    if not function_calling_enabled:
-                        console.print("• Function calling is disabled - enable it in your configuration")
-                    elif not available_tools:
-                        console.print("• No tools are available - check your tool registration")
-                    elif "gpt-3.5" in model_name.lower():
-                        console.print("• Consider using GPT-4 or Claude for better function calling support")
-                        console.print("• GPT-3.5 has limited function calling capabilities")
-                    elif "claude" in model_name.lower():
-                        console.print("• Ensure you're using Claude 3 (Sonnet/Opus) for function calling")
-                        console.print("• Claude 2 has limited function calling support")
-                    else:
-                        console.print("• Verify your model supports function calling")
-                        console.print("• Check if your API key has the necessary permissions")
-                        console.print("• Try enabling debug mode with --verbose for more details")
-                    
-                    warnings_shown.append(warning_msg)
-                
-                elif event.event_type == "llm_response":
-                    content = event.data.get("content", "")
-                    has_tool_calls = event.data.get("has_tool_calls", False)
-                    is_follow_up = event.data.get("is_follow_up", False)
-                    tool_call_count = event.data.get("tool_call_count", 0)
-                    
-                    if verbose:
-                        console.print(f"[dim]DEBUG: LLM response - has_tool_calls: {has_tool_calls}, tool_count: {tool_call_count}, is_follow_up: {is_follow_up}[/dim]")
-                    
-                    if content and not has_tool_calls:
-                        if not is_follow_up:
-                            progress.stop()
-                        final_response = content
-                
-                elif event.event_type == "task_failed":
-                    progress.stop()
-                    error = event.data.get("error", "Unknown error")
-                    
-                    # Enhanced error display with better formatting
-                    if "LLM API Error:" in error:
-                        # Extract the API error part
-                        api_error = error.replace("LLM API Error: ", "")
-                        console.print(f"\n[bold red]🚨 API Error[/bold red]")
-                        console.print(Panel(
-                            f"[red]{api_error}[/red]",
-                            title="API Error Details",
-                            border_style="red"
-                        ))
+            try:
+                async for event in agent.execute_task(message, execution_mode=execution_mode):
+                    try:
+                        if event.event_type == "tool_call_started":
+                            tool_calls_made = True
+                            tool_name = event.data.get("tool_name", "unknown")
+                            progress.update(progress.task_ids[0], description=f"[bold blue]Using {tool_name}...")
+                            if verbose:
+                                console.print(f"[dim]Tool call started: {tool_name}[/dim]")
                         
-                        # Provide helpful guidance based on error type
-                        if "authentication" in error.lower() or "unauthorized" in error.lower():
-                            console.print("\n[yellow]💡 Troubleshooting Tips:[/yellow]")
-                            console.print("• Check that your API key is correctly set")
-                            console.print("• Verify the API key has the necessary permissions")
-                            console.print("• Ensure you're using the correct provider")
-                        elif "rate limit" in error.lower() or "quota" in error.lower():
-                            console.print("\n[yellow]💡 Troubleshooting Tips:[/yellow]")
-                            # Check if it's specifically a quota issue
-                            if "exceeded your current quota" in error.lower() or "billing details" in error.lower():
-                                console.print("• Your OpenAI quota has been exceeded")
-                                console.print("• Consider upgrading your OpenAI plan")
-                                console.print("• [bold cyan]Alternative: Use Anthropic Claude instead[/bold cyan]")
-                                console.print("  Try: --provider anthropic --model claude-3-haiku-20240307")
+                        elif event.event_type == "tool_call_completed":
+                            tool_name = event.data.get("tool_name", "unknown")
+                            success = event.data.get("success", False)
+                            if verbose:
+                                status = "✓" if success else "✗"
+                                console.print(f"[dim]Tool call completed: {tool_name} {status}[/dim]")
+                            
+                            # Show tool failure warnings
+                            if not success:
+                                error_msg = event.data.get("error", "Unknown error")
+                                console.print(f"[yellow]Warning: Tool '{tool_name}' failed: {error_msg}[/yellow]")
+                                warnings_shown = True
+                        
+                        elif event.event_type == "llm_response":
+                            content = event.data.get("content", "")
+                            if content:
+                                final_response = content
+                                progress.update(progress.task_ids[0], description="[bold blue]Processing response...")
+                                if verbose:
+                                    iteration = event.data.get("iteration", "unknown")
+                                    console.print(f"[dim]LLM response received (iteration {iteration})[/dim]")
+                        
+                        elif event.event_type == "task_completed":
+                            execution_completed = True
+                            if verbose:
+                                iterations = event.data.get("iterations_completed", "unknown")
+                                execution_time = event.data.get("execution_time", 0)
+                                console.print(f"[dim]Task completed in {iterations} iterations ({execution_time:.2f}s)[/dim]")
+                            break
+                        
+                        elif event.event_type == "task_failed":
+                            error = event.data.get("error", "Unknown error")
+                            error_type = event.data.get("error_type", "Unknown")
+                            iterations = event.data.get("iterations_completed", "unknown")
+                            
+                            # Enhanced error reporting
+                            console.print(f"[bold red]Task Failed[/bold red]")
+                            console.print(f"[red]Error Type: {error_type}[/red]")
+                            console.print(f"[red]Error: {error}[/red]")
+                            
+                            if iterations != "unknown":
+                                console.print(f"[dim]Iterations completed: {iterations}[/dim]")
+                            
+                            if verbose:
+                                traceback_info = event.data.get("traceback")
+                                if traceback_info:
+                                    console.print(f"[dim]Traceback: {traceback_info}[/dim]")
+                            
+                            # Provide troubleshooting tips based on error type
+                            if "timeout" in error.lower():
+                                console.print("\n[yellow]💡 Troubleshooting Tips:[/yellow]")
+                                console.print("• The task exceeded the configured timeout")
+                                console.print("• Try breaking down complex tasks into smaller steps")
+                                console.print("• Consider increasing timeout in configuration")
+                            elif "recursion" in error.lower() or "iteration" in error.lower():
+                                console.print("\n[yellow]💡 Troubleshooting Tips:[/yellow]")
+                                console.print("• The task exceeded maximum iterations")
+                                console.print("• This may indicate an infinite loop in tool usage")
+                                console.print("• Try rephrasing the task or breaking it down")
+                            elif "api" in error.lower() and ("key" in error.lower() or "auth" in error.lower()):
+                                console.print("\n[yellow]💡 Troubleshooting Tips:[/yellow]")
+                                console.print("• Check your API key configuration")
+                                console.print("• Verify the API key has sufficient permissions")
+                                console.print("• Ensure the API key is not expired")
+                            elif "model" in error.lower() and ("not found" in error.lower() or "invalid" in error.lower()):
+                                console.print("\n[yellow]💡 Troubleshooting Tips:[/yellow]")
+                                console.print("• Verify the model name is correct")
+                                console.print("• Check if the model is available for your provider")
+                                console.print("• Try using a different model")
+                            elif "connection" in error.lower() or "timeout" in error.lower():
+                                console.print("\n[yellow]💡 Troubleshooting Tips:[/yellow]")
+                                console.print("• Check your internet connection")
+                                console.print("• Try again in a few moments")
+                                console.print("• Verify firewall settings")
                             else:
-                                console.print("• Wait a few minutes before trying again")
-                                console.print("• Check your API usage limits")
-                                console.print("• Consider upgrading your API plan")
-                        elif "model" in error.lower() and ("not found" in error.lower() or "invalid" in error.lower()):
-                            console.print("\n[yellow]💡 Troubleshooting Tips:[/yellow]")
-                            console.print("• Verify the model name is correct")
-                            console.print("• Check if the model is available for your provider")
-                            console.print("• Try using a different model")
-                        elif "connection" in error.lower() or "timeout" in error.lower():
-                            console.print("\n[yellow]💡 Troubleshooting Tips:[/yellow]")
-                            console.print("• Check your internet connection")
-                            console.print("• Try again in a few moments")
-                            console.print("• Verify firewall settings")
-                    else:
-                        console.print(f"\n[bold red]Agent Task Failed[/bold red]: {error}")
-                    
-                    # Don't display final response on error
-                    final_response = ""
-                    break
+                                console.print(f"\n[bold red]Agent Task Failed[/bold red]: {error}")
+                            
+                            # Don't display final response on error
+                            final_response = ""
+                            last_error = error
+                            break
+                            
+                    except Exception as event_error:
+                        console.print(f"[red]Error processing event: {str(event_error)}[/red]")
+                        if verbose:
+                            import traceback
+                            console.print(f"[dim]Event processing error traceback:\n{traceback.format_exc()}[/dim]")
+                        last_error = str(event_error)
+                        break
+                        
+            except Exception as execution_error:
+                console.print(f"[red]Task execution failed: {str(execution_error)}[/red]")
+                if verbose:
+                    import traceback
+                    console.print(f"[dim]Execution error traceback:\n{traceback.format_exc()}[/dim]")
+                last_error = str(execution_error)
         
-        # Display response
-        if final_response:
+        # Display response or error summary
+        if final_response and not last_error:
             console.print(Panel(f"[bold green]Agent Response[/bold green]\n{final_response}", title="Agent"))
+        elif last_error:
+            if not warnings_shown:  # Only show this if we haven't already shown detailed error info
+                console.print(Panel(f"[bold red]Error[/bold red]\n{last_error}", title="Agent"))
         elif not warnings_shown:
-            # Only show "no response" if we haven't already shown warnings
+            # Only show "no response" if we haven't already shown warnings or errors
             console.print(Panel(f"[bold red]Error[/bold red]\nNo response generated", title="Agent"))
         
         # Check for pending todos and process them automatically
         await _check_and_process_pending_todos(agent, verbose)
         
+        # Show execution summary if verbose
+        if verbose:
+            console.print(f"[dim]Execution summary:[/dim]")
+            console.print(f"[dim]- Tool calls made: {tool_calls_made}[/dim]")
+            console.print(f"[dim]- Execution completed: {execution_completed}[/dim]")
+            console.print(f"[dim]- Final response length: {len(final_response)} characters[/dim]")
+        
     except Exception as e:
-        console.print(f"[red]Error in chat: {str(e)}[/red]")
+        console.print(f"[red]Critical error in chat execution: {str(e)}[/red]")
         if verbose:
             import traceback
-            console.print(f"[dim]Debug traceback:\n{traceback.format_exc()}[/dim]")
+            console.print(f"[dim]Critical error traceback:\n{traceback.format_exc()}[/dim]")
         raise typer.Exit(1)
 
 

@@ -9,6 +9,8 @@ disable_system_prompt feature.
 import asyncio
 import logging
 import time
+import signal
+import sys
 from typing import Dict, List, Any, Optional, AsyncIterator, Type
 from datetime import datetime
 import json
@@ -37,6 +39,37 @@ from ..llm.client import LLMClient
 from ..tools.manager import ToolManager
 from ..context.manager import ContextManager
 from .planner import TaskPlanner
+
+
+class GracefulShutdown:
+    """Handle graceful shutdown for long-running operations."""
+    
+    def __init__(self):
+        self.shutdown_requested = False
+        self.setup_signal_handlers()
+    
+    def setup_signal_handlers(self):
+        """Set up signal handlers for graceful shutdown."""
+        try:
+            # Handle SIGINT (Ctrl+C) and SIGTERM
+            signal.signal(signal.SIGINT, self._signal_handler)
+            signal.signal(signal.SIGTERM, self._signal_handler)
+        except (ValueError, OSError):
+            # Signal handling might not be available in all environments
+            pass
+    
+    def _signal_handler(self, signum, frame):
+        """Signal handler for graceful shutdown."""
+        print(f"\nReceived signal {signum}, initiating graceful shutdown...")
+        self.shutdown_requested = True
+    
+    def check_shutdown(self):
+        """Check if shutdown has been requested."""
+        return self.shutdown_requested
+
+
+# Global shutdown handler
+_shutdown_handler = GracefulShutdown()
 
 
 class AgentState(TypedDict):
@@ -385,6 +418,10 @@ class TaskExecutor:
         self.logger.debug(f"Executing task: {task}")
         yield AgentEvent(event_type="task_started", data={"task": task, "execution_mode": execution_mode.value})
         
+        # Get timeout from configuration
+        task_timeout = getattr(self.config.execution_config, 'task_timeout', 600)
+        max_iterations = getattr(self.config.execution_config, 'max_iterations', 50)
+        
         try:
             # Create task prompt
             prompt = await self.planner.create_task_prompt(task, context)
@@ -395,72 +432,151 @@ class TaskExecutor:
                 prompt = f"{prompt}\n\n{pydantic_instructions}"
                 self.logger.debug(f"Added Pydantic formatting instructions for model: {output_pydantic.__name__}")
             
-            # Execute with LangGraph workflow with proper config
+            # Execute with LangGraph workflow with proper config and timeout
             inputs = {"messages": [HumanMessage(content=prompt)]}
             config = {
-                "recursion_limit": getattr(self.config.execution_config, 'max_iterations', 50)
+                "recursion_limit": max_iterations
             }
+            
+            self.logger.debug(f"Starting workflow execution with timeout: {task_timeout}s, max_iterations: {max_iterations}")
             
             final_content = ""
             execution_events = []
+            iteration_count = 0
             
-            # Stream through the workflow
-            async for event in self.workflow_app.astream(inputs, config=config):
-                # Debug log the event
-                if self.debug_mode:
-                    self.logger.debug(f"Workflow event: {event}")
+            # Wrap workflow execution with timeout
+            try:
+                # Stream through the workflow with timeout
+                async with asyncio.timeout(task_timeout):
+                    async for event in self.workflow_app.astream(inputs, config=config):
+                        iteration_count += 1
+                        
+                        # Check for graceful shutdown request
+                        if _shutdown_handler.check_shutdown():
+                            self.logger.warning("Graceful shutdown requested, stopping task execution")
+                            shutdown_event = AgentEvent(
+                                event_type="task_failed",
+                                data={
+                                    "task": task,
+                                    "error": "Task execution interrupted by shutdown request",
+                                    "iteration_count": iteration_count,
+                                    "shutdown_requested": True
+                                }
+                            )
+                            yield shutdown_event
+                            raise KeyboardInterrupt("Task execution interrupted by shutdown request")
+                        
+                        # Debug log the event
+                        if self.debug_mode:
+                            self.logger.debug(f"Workflow event (iteration {iteration_count}): {event}")
+                        
+                        # Check for potential infinite loops
+                        if iteration_count > max_iterations * 2:  # Safety margin
+                            self.logger.warning(f"Workflow exceeded safety iteration limit ({max_iterations * 2})")
+                            error_event = AgentEvent(
+                                event_type="task_failed",
+                                data={
+                                    "task": task,
+                                    "error": f"Execution exceeded maximum iterations ({max_iterations * 2})",
+                                    "iteration_count": iteration_count
+                                }
+                            )
+                            yield error_event
+                            raise RuntimeError(f"Execution exceeded maximum iterations ({max_iterations * 2})")
+                        
+                        # Extract messages from the event
+                        for node_name, node_output in event.items():
+                            if node_name == "agent" and "messages" in node_output:
+                                messages = node_output["messages"]
+                                if messages:
+                                    last_message = messages[-1]
+                                    
+                                    # Check if this is an AI message (response)
+                                    if hasattr(last_message, 'content') and last_message.content:
+                                        final_content = last_message.content
+                                        
+                                        # Emit LLM response event
+                                        llm_event = AgentEvent(
+                                            event_type="llm_response",
+                                            data={
+                                                "content": final_content,
+                                                "finish_reason": "stop",
+                                                "model": self.config.llm_config.model,
+                                                "iteration": iteration_count
+                                            }
+                                        )
+                                        execution_events.append(llm_event)
+                                        yield llm_event
+                                    
+                                    # Check for tool calls
+                                    tool_calls = self._extract_tool_calls(last_message)
+                                    for tool_call in tool_calls:
+                                        tool_event = AgentEvent(
+                                            event_type="tool_call_started",
+                                            data={
+                                                "tool_name": tool_call.name,
+                                                "parameters": tool_call.arguments,
+                                                "iteration": iteration_count
+                                            }
+                                        )
+                                        execution_events.append(tool_event)
+                                        yield tool_event
+                            
+                            elif node_name == "tools" and "messages" in node_output:
+                                # Handle tool results
+                                messages = node_output["messages"]
+                                for message in messages:
+                                    if hasattr(message, 'content') and hasattr(message, 'tool_call_id'):
+                                        tool_result_event = AgentEvent(
+                                            event_type="tool_call_completed",
+                                            data={
+                                                "tool_call_id": message.tool_call_id,
+                                                "success": True,
+                                                "result": message.content,
+                                                "iteration": iteration_count
+                                            }
+                                        )
+                                        execution_events.append(tool_result_event)
+                                        yield tool_result_event
+                                        
+            except asyncio.TimeoutError:
+                self.logger.error(f"Task execution timed out after {task_timeout} seconds")
+                timeout_event = AgentEvent(
+                    event_type="task_failed",
+                    data={
+                        "task": task,
+                        "error": f"Task execution timed out after {task_timeout} seconds",
+                        "timeout": task_timeout,
+                        "iterations_completed": iteration_count
+                    }
+                )
+                yield timeout_event
+                raise TimeoutError(f"Task execution timed out after {task_timeout} seconds")
                 
-                # Extract messages from the event
-                for node_name, node_output in event.items():
-                    if node_name == "agent" and "messages" in node_output:
-                        messages = node_output["messages"]
-                        if messages:
-                            last_message = messages[-1]
-                            
-                            # Check if this is an AI message (response)
-                            if hasattr(last_message, 'content') and last_message.content:
-                                final_content = last_message.content
-                                
-                                # Emit LLM response event
-                                llm_event = AgentEvent(
-                                    event_type="llm_response",
-                                    data={
-                                        "content": final_content,
-                                        "finish_reason": "stop",
-                                        "model": self.config.llm_config.model
-                                    }
-                                )
-                                execution_events.append(llm_event)
-                                yield llm_event
-                            
-                            # Check for tool calls
-                            tool_calls = self._extract_tool_calls(last_message)
-                            for tool_call in tool_calls:
-                                tool_event = AgentEvent(
-                                    event_type="tool_call_started",
-                                    data={
-                                        "tool_name": tool_call.name,
-                                        "parameters": tool_call.arguments
-                                    }
-                                )
-                                execution_events.append(tool_event)
-                                yield tool_event
-                    
-                    elif node_name == "tools" and "messages" in node_output:
-                        # Handle tool results
-                        messages = node_output["messages"]
-                        for message in messages:
-                            if hasattr(message, 'content') and hasattr(message, 'tool_call_id'):
-                                tool_result_event = AgentEvent(
-                                    event_type="tool_call_completed",
-                                    data={
-                                        "tool_call_id": message.tool_call_id,
-                                        "success": True,
-                                        "result": message.content
-                                    }
-                                )
-                                execution_events.append(tool_result_event)
-                                yield tool_result_event
+            except Exception as workflow_error:
+                self.logger.error(f"Workflow execution failed: {str(workflow_error)}", exc_info=True)
+                
+                # Check for specific error types
+                error_type = type(workflow_error).__name__
+                if "recursion" in str(workflow_error).lower() or "maximum" in str(workflow_error).lower():
+                    error_msg = f"Workflow exceeded recursion limit ({max_iterations} iterations)"
+                    self.logger.error(f"Recursion limit exceeded: {error_msg}")
+                else:
+                    error_msg = f"Workflow execution failed: {str(workflow_error)}"
+                
+                workflow_error_event = AgentEvent(
+                    event_type="task_failed",
+                    data={
+                        "task": task,
+                        "error": error_msg,
+                        "error_type": error_type,
+                        "iterations_completed": iteration_count
+                    }
+                )
+                yield workflow_error_event
+                raise workflow_error
+            
+            self.logger.debug(f"Workflow completed successfully after {iteration_count} iterations")
             
             # Create TaskResult with Pydantic parsing if requested
             task_result = await self._create_task_result(
@@ -473,19 +589,22 @@ class TaskExecutor:
                 data={
                     "task": task,
                     "result": task_result.dict(),
-                    "execution_time": task_result.execution_time
+                    "execution_time": task_result.execution_time,
+                    "iterations_completed": iteration_count
                 }
             )
             execution_events.append(completion_event)
             yield completion_event
             
         except Exception as e:
-            self.logger.error(f"Error executing task: {str(e)}")
+            self.logger.error(f"Error executing task: {str(e)}", exc_info=True)
             error_event = AgentEvent(
                 event_type="task_failed",
                 data={
                     "task": task,
-                    "error": str(e)
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                    "traceback": str(e.__traceback__) if hasattr(e, '__traceback__') else None
                 }
             )
             yield error_event
@@ -545,92 +664,168 @@ class TaskExecutor:
         return result
     
     async def execute_interactive_chat(self, user_message: str, context: Optional[Dict[str, Any]] = None) -> AsyncIterator[AgentEvent]:
-        """Execute an interactive chat using LangGraph workflow for streaming."""
+        """Execute interactive chat with enhanced error handling and monitoring."""
         
-        # Set the execution mode for interactive chat
-        self.set_execution_mode(ExecutionMode.CHAT)
+        # Get timeout from configuration
+        chat_timeout = getattr(self.config.execution_config, 'timeout', 300)
+        max_iterations = getattr(self.config.execution_config, 'max_iterations', 50)
         
-        self.logger.debug(f"Executing interactive chat for: {user_message}")
-        yield AgentEvent(event_type="chat_started", data={"user_message": user_message})
-
-        if self.debug_mode:
-            self.logger.debug(f"Available tools: {len(self.langchain_tools)}")
-            self.logger.debug(f"disable_system_prompt: {self.config.llm_config.disable_system_prompt}")
+        self.logger.debug(f"Starting interactive chat with timeout: {chat_timeout}s, max_iterations: {max_iterations}")
         
-        # Track tool calls and their start times
+        # Initialize tool call tracking
         tool_call_tracker = {}
         
         try:
-            # Execute with LangGraph workflow for streaming with proper config
+            # Execute with LangGraph workflow for streaming with proper config and timeout
             inputs = {"messages": [HumanMessage(content=user_message)]}
             config = {
-                "recursion_limit": getattr(self.config.execution_config, 'max_iterations', 50)
+                "recursion_limit": max_iterations
             }
             
-            async for output in self.workflow_app.astream(inputs, config=config, stream_mode="updates"):
-                for node_name, node_output in output.items():
-                    if node_name == "agent":
-                        # Agent response
-                        message = node_output["messages"][-1]
-                        has_tool_calls = self._has_tool_calls(message)
-                        tool_call_count = 0
-                        
-                        if has_tool_calls:
-                            # Extract and track tool calls
-                            tool_calls = self._extract_tool_calls(message)
-                            tool_call_count = len(tool_calls)
-                            
-                            # Emit tool_call_started events and track them
-                            for tool_call in tool_calls:
-                                start_time = time.time()
-                                tool_call_tracker[tool_call.id or tool_call.call_id] = {
-                                    "tool_name": tool_call.name,
-                                    "start_time": start_time,
-                                    "parameters": tool_call.arguments
-                                }
-                                
-                                yield AgentEvent(
-                                    event_type="tool_call_started",
-                                    data={
-                                        "tool_name": tool_call.name,
-                                        "parameters": tool_call.arguments,
-                                        "call_id": tool_call.id or tool_call.call_id
-                                    }
-                                )
-                        
-                        yield AgentEvent(
-                            event_type="llm_response",
-                            data={
-                                "content": message.content,
-                                "has_tool_calls": has_tool_calls,
-                                "tool_call_count": tool_call_count,
-                                "node": node_name
-                            }
-                        )
-                    elif node_name == "tools":
-                        # Tool execution results
-                        for message in node_output["messages"]:
-                            if isinstance(message, ToolMessage):
-                                call_id = message.tool_call_id
-                                tracked_call = tool_call_tracker.get(call_id, {})
-                                tool_name = tracked_call.get("tool_name", "unknown")
-                                start_time = tracked_call.get("start_time", time.time())
-                                execution_time = time.time() - start_time
-                                
-                                yield AgentEvent(
-                                    event_type="tool_call_completed",
-                                    data={
-                                        "tool_name": tool_name,
-                                        "success": True,
-                                        "result": message.content,
-                                        "call_id": call_id,
-                                        "execution_time": execution_time,
-                                        "node": node_name
-                                    }
-                                )
+            iteration_count = 0
             
-            yield AgentEvent(event_type="chat_completed", data={"user_message": user_message})
-
+            # Wrap workflow execution with timeout
+            try:
+                async with asyncio.timeout(chat_timeout):
+                    async for output in self.workflow_app.astream(inputs, config=config, stream_mode="updates"):
+                        iteration_count += 1
+                        
+                        # Debug log the output
+                        if self.debug_mode:
+                            self.logger.debug(f"Interactive chat workflow output (iteration {iteration_count}): {output}")
+                        
+                        # Check for potential infinite loops
+                        if iteration_count > max_iterations * 2:  # Safety margin
+                            self.logger.warning(f"Interactive chat exceeded safety iteration limit ({max_iterations * 2})")
+                            error_event = AgentEvent(
+                                event_type="task_failed",
+                                data={
+                                    "error": f"Interactive chat exceeded maximum iterations ({max_iterations * 2})",
+                                    "iteration_count": iteration_count
+                                }
+                            )
+                            yield error_event
+                            raise RuntimeError(f"Interactive chat exceeded maximum iterations ({max_iterations * 2})")
+                        
+                        for node_name, node_output in output.items():
+                            if node_name == "agent":
+                                # Agent response
+                                message = node_output["messages"][-1]
+                                has_tool_calls = self._has_tool_calls(message)
+                                tool_call_count = 0
+                                
+                                if has_tool_calls:
+                                    # Extract and track tool calls
+                                    tool_calls = self._extract_tool_calls(message)
+                                    tool_call_count = len(tool_calls)
+                                    
+                                    # Emit tool_call_started events and track them
+                                    for tool_call in tool_calls:
+                                        start_time = time.time()
+                                        tool_call_tracker[tool_call.id or tool_call.call_id] = {
+                                            "tool_name": tool_call.name,
+                                            "start_time": start_time,
+                                            "parameters": tool_call.arguments
+                                        }
+                                        
+                                        yield AgentEvent(
+                                            event_type="tool_call_started",
+                                            data={
+                                                "tool_name": tool_call.name,
+                                                "parameters": tool_call.arguments,
+                                                "call_id": tool_call.id or tool_call.call_id,
+                                                "iteration": iteration_count
+                                            }
+                                        )
+                                
+                                # Check if this is a final response (no tool calls)
+                                if not has_tool_calls and hasattr(message, 'content') and message.content:
+                                    yield AgentEvent(
+                                        event_type="llm_response",
+                                        data={
+                                            "content": message.content,
+                                            "finish_reason": "stop",
+                                            "model": self.config.llm_config.model,
+                                            "iteration": iteration_count
+                                        }
+                                    )
+                            
+                            elif node_name == "tools":
+                                # Tool execution results
+                                messages = node_output["messages"]
+                                for message in messages:
+                                    if hasattr(message, 'tool_call_id') and message.tool_call_id in tool_call_tracker:
+                                        # Calculate execution time
+                                        tracker_info = tool_call_tracker[message.tool_call_id]
+                                        execution_time = time.time() - tracker_info["start_time"]
+                                        
+                                        # Determine success based on message content
+                                        success = not (hasattr(message, 'content') and 
+                                                     message.content and 
+                                                     'error' in str(message.content).lower())
+                                        
+                                        yield AgentEvent(
+                                            event_type="tool_call_completed",
+                                            data={
+                                                "tool_name": tracker_info["tool_name"],
+                                                "tool_call_id": message.tool_call_id,
+                                                "success": success,
+                                                "result": message.content if hasattr(message, 'content') else str(message),
+                                                "execution_time": execution_time,
+                                                "iteration": iteration_count
+                                            }
+                                        )
+                                        
+                                        # Remove from tracker
+                                        del tool_call_tracker[message.tool_call_id]
+                        
+            except asyncio.TimeoutError:
+                self.logger.error(f"Interactive chat timed out after {chat_timeout} seconds")
+                timeout_event = AgentEvent(
+                    event_type="task_failed",
+                    data={
+                        "error": f"Interactive chat timed out after {chat_timeout} seconds",
+                        "timeout": chat_timeout,
+                        "iterations_completed": iteration_count
+                    }
+                )
+                yield timeout_event
+                raise TimeoutError(f"Interactive chat timed out after {chat_timeout} seconds")
+                
+            except Exception as workflow_error:
+                self.logger.error(f"Interactive chat workflow failed: {str(workflow_error)}", exc_info=True)
+                
+                # Check for specific error types
+                error_type = type(workflow_error).__name__
+                if "recursion" in str(workflow_error).lower() or "maximum" in str(workflow_error).lower():
+                    error_msg = f"Interactive chat exceeded recursion limit ({max_iterations} iterations)"
+                    self.logger.error(f"Recursion limit exceeded in chat: {error_msg}")
+                else:
+                    error_msg = f"Interactive chat workflow failed: {str(workflow_error)}"
+                
+                workflow_error_event = AgentEvent(
+                    event_type="task_failed",
+                    data={
+                        "error": error_msg,
+                        "error_type": error_type,
+                        "iterations_completed": iteration_count
+                    }
+                )
+                yield workflow_error_event
+                raise workflow_error
+            
+            self.logger.debug(f"Interactive chat completed successfully after {iteration_count} iterations")
+            
+            # Emit completion event
+            yield AgentEvent(
+                event_type="chat_completed",
+                data={
+                    "message": "Interactive chat completed successfully",
+                    "iterations_completed": iteration_count
+                },
+                timestamp=datetime.now()
+            )
+            
             # Check for pending todos and process them automatically
             await self._check_and_process_pending_todos()
 
@@ -638,7 +833,11 @@ class TaskExecutor:
             self.logger.error(f"Interactive chat failed: {str(e)}", exc_info=True)
             yield AgentEvent(
                 event_type="task_failed",
-                data={"error": f"Chat execution failed: {str(e)}"},
+                data={
+                    "error": f"Chat execution failed: {str(e)}",
+                    "error_type": type(e).__name__,
+                    "traceback": str(e.__traceback__) if hasattr(e, '__traceback__') else None
+                },
                 timestamp=datetime.now()
             )
             

@@ -369,8 +369,9 @@ class TestFileTools:
             f.flush()
             
             result = await read_file.execute(file_path=f.name)
-            assert result["content"] == "test content"
-            assert result["success"] is True
+            # read_file now returns line-prefixed content
+            assert result.success is True
+            assert "1\t|\ttest content" in result.result["content"]
     
     @pytest.mark.asyncio
     async def test_create_file_execution(self):
@@ -380,9 +381,9 @@ class TestFileTools:
             
             result = await create_file.execute(
                 file_path=str(file_path),
-                content="test content"
+                full_content="test content"
             )
-            assert result["success"] is True
+            assert result.success is True
             assert file_path.exists()
             assert file_path.read_text() == "test content"
 
