@@ -446,9 +446,18 @@ class TaskExecutor:
             
             # Wrap workflow execution with timeout
             try:
-                # Stream through the workflow with timeout
-                async with asyncio.timeout(task_timeout):
+                # Stream through the workflow with timeout using asyncio.wait_for
+                async def process_workflow():
+                    events = []
                     async for event in self.workflow_app.astream(inputs, config=config):
+                        events.append(event)
+                    return events
+                
+                # Execute workflow with timeout
+                events = await asyncio.wait_for(process_workflow(), timeout=task_timeout)
+                
+                # Process events
+                for event in events:
                         iteration_count += 1
                         
                         # Check for graceful shutdown request
@@ -686,8 +695,18 @@ class TaskExecutor:
             
             # Wrap workflow execution with timeout
             try:
-                async with asyncio.timeout(chat_timeout):
+                # Stream through the workflow with timeout using asyncio.wait_for
+                async def process_chat_workflow():
+                    outputs = []
                     async for output in self.workflow_app.astream(inputs, config=config, stream_mode="updates"):
+                        outputs.append(output)
+                    return outputs
+                
+                # Execute workflow with timeout
+                outputs = await asyncio.wait_for(process_chat_workflow(), timeout=chat_timeout)
+                
+                # Process outputs
+                for output in outputs:
                         iteration_count += 1
                         
                         # Debug log the output
