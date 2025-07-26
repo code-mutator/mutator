@@ -224,11 +224,17 @@ class LLMClient:
             except Exception as e:
                 error_msg = str(e)
                 
+                # Check if this is a timeout error and log response body
+                if self._is_timeout_error(e, error_msg):
+                    response_body = self._extract_timeout_response_body(e)
+                    self.logger.error(f"LiteLLM timeout error (attempt {attempt + 1}/{max_retries + 1}): {error_msg}")
+                    self.logger.error(f"Timeout response body: {response_body}")
+                
                 # Enhanced logging for rate limit debugging
                 if self._is_rate_limit_error(error_msg, error_msg):
                     self.logger.warning(f"Rate limit error detected (attempt {attempt + 1}/{max_retries + 1}): {error_msg}")
                     self.logger.debug(f"Full exception details: {repr(e)}")
-                else:
+                elif not self._is_timeout_error(e, error_msg):  # Avoid duplicate logging for timeouts
                     self.logger.error(f"LLM completion failed (attempt {attempt + 1}/{max_retries + 1}): {error_msg}")
                 
                 # Check if this is a retryable error
@@ -692,11 +698,17 @@ class LLMClient:
             except Exception as e:
                 error_msg = str(e)
                 
+                # Check if this is a timeout error and log response body
+                if self._is_timeout_error(e, error_msg):
+                    response_body = self._extract_timeout_response_body(e)
+                    self.logger.error(f"LiteLLM timeout error in stream completion (attempt {attempt + 1}/{max_retries + 1}): {error_msg}")
+                    self.logger.error(f"Timeout response body: {response_body}")
+                
                 # Enhanced logging for rate limit debugging
                 if self._is_rate_limit_error(error_msg, error_msg):
                     self.logger.warning(f"Rate limit error in stream completion (attempt {attempt + 1}/{max_retries + 1}): {error_msg}")
                     self.logger.debug(f"Full exception details: {repr(e)}")
-                else:
+                elif not self._is_timeout_error(e, error_msg):  # Avoid duplicate logging for timeouts
                     self.logger.error(f"Stream completion failed (attempt {attempt + 1}/{max_retries + 1}): {error_msg}")
                 
                 # Check if this is a retryable error
@@ -915,6 +927,74 @@ class LLMClient:
                 return True
         
         return False
+    
+    def _is_timeout_error(self, exception: Exception, error_msg: str) -> bool:
+        """Check if an error is specifically a timeout error."""
+        timeout_patterns = [
+            "timeout", "timed out", "connection timeout", "gateway timeout"
+        ]
+        
+        error_lower = error_msg.lower()
+        
+        # Check for timeout patterns
+        for pattern in timeout_patterns:
+            if pattern in error_lower:
+                return True
+        
+        # Check for specific exception types
+        if hasattr(exception, '__class__'):
+            exception_name = exception.__class__.__name__.lower()
+            if 'timeout' in exception_name:
+                return True
+        
+        return False
+    
+    def _extract_timeout_response_body(self, exception: Exception) -> str:
+        """Extract response body from timeout exception if available."""
+        response_body = "No response body available"
+        
+        try:
+            # Try to get response body from various exception attributes
+            if hasattr(exception, 'response') and exception.response:
+                response = exception.response
+                if hasattr(response, 'text'):
+                    response_body = response.text
+                elif hasattr(response, 'content'):
+                    content = response.content
+                    if isinstance(content, bytes):
+                        response_body = content.decode('utf-8', errors='ignore')
+                    else:
+                        response_body = str(content)
+                elif hasattr(response, 'json'):
+                    try:
+                        response_body = str(response.json())
+                    except Exception:
+                        response_body = str(response)
+                else:
+                    response_body = str(response)
+            
+            # Try to get response from OpenAI-style exceptions
+            elif hasattr(exception, 'body') and exception.body:
+                response_body = str(exception.body)
+            
+            # Try to get response from requests-style exceptions
+            elif hasattr(exception, 'args') and exception.args:
+                for arg in exception.args:
+                    if isinstance(arg, dict) and ('response' in arg or 'body' in arg):
+                        response_body = str(arg)
+                        break
+            
+            # Fallback: try to extract any JSON-like content from the error message
+            import re
+            json_match = re.search(r'\{.*\}', str(exception))
+            if json_match:
+                response_body = json_match.group(0)
+                
+        except Exception as e:
+            self.logger.debug(f"Failed to extract response body from timeout exception: {e}")
+            response_body = f"Failed to extract response body: {str(e)}"
+        
+        return response_body
     
     def _build_messages(self, user_message: str, system_message: Optional[str] = None, include_history: bool = True) -> List[Dict[str, Any]]:
         """Build messages list for completion."""
