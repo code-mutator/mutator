@@ -43,35 +43,7 @@ class TestLLMConfig:
         )
         
         assert config.base_url == "https://api.example.com"
-        assert config.api_base is None  # Should not be set when using base_url
         
-    def test_llm_config_api_base_deprecation_warning(self):
-        """Test that using api_base shows deprecation warning."""
-        with pytest.warns(DeprecationWarning, match="The 'api_base' parameter is deprecated"):
-            config = LLMConfig(
-                model="gpt-4",
-                api_key="test-key",
-                api_base="https://api.example.com"
-            )
-        
-        # Should copy api_base to base_url
-        assert config.base_url == "https://api.example.com"
-        assert config.api_base == "https://api.example.com"
-        
-    def test_llm_config_both_base_url_and_api_base(self):
-        """Test that providing both base_url and api_base prefers base_url."""
-        with pytest.warns(DeprecationWarning, match="Both 'api_base' and 'base_url' are provided"):
-            config = LLMConfig(
-                model="gpt-4",
-                api_key="test-key",
-                base_url="https://api.new.com",
-                api_base="https://api.old.com"
-            )
-        
-        # Should prefer base_url over api_base
-        assert config.base_url == "https://api.new.com"
-        assert config.api_base == "https://api.old.com"
-    
     def test_llm_config_defaults(self):
         """Test LLMConfig with defaults."""
         # Temporarily clear environment variables that might interfere

@@ -278,122 +278,138 @@ class ToolManager:
             tool_name = tool_call.name
             tool_arguments = tool_call.arguments
         
+        # Log function call start with structured format
+        self.logger.info(f"Calling {tool_name}")
+        if tool_arguments:
+            self.logger.info("Params:")
+            for key, value in tool_arguments.items():
+                # Truncate very long values for readability
+                if isinstance(value, str) and len(value) > 200:
+                    display_value = value[:200] + "..."
+                else:
+                    display_value = value
+                self.logger.info(f"- {key}: {display_value}")
+        else:
+            self.logger.info("Params: None")
+
         # Check if it's an MCP tool
         if "." in tool_name:
             server_name, mcp_tool_name = tool_name.split(".", 1)
             server = self.mcp_manager.get_server(server_name)
             if server:
-                return await server.call_tool(mcp_tool_name, tool_arguments)
-        
-        # Get tool from registry
-        tool = self.registry.get_tool(tool_name)
-        if not tool:
-            return ToolResult(
-                tool_name=tool_name,
-                success=False,
-                error=f"Tool '{tool_name}' not found"
-            )
-        
-        # Update execution stats
-        if tool_name not in self.execution_stats:
-            self.execution_stats[tool_name] = {
-                "total_calls": 0,
-                "successful_calls": 0,
-                "failed_calls": 0,
-                "total_execution_time": 0.0,
-                "average_execution_time": 0.0
-            }
-        
-        self.execution_stats[tool_name]["total_calls"] += 1
-        
-        try:
-            # Log function call start with structured format
-            self.logger.info(f"Calling {tool_name}")
-            if tool_arguments:
-                self.logger.info("Params:")
-                for key, value in tool_arguments.items():
-                    # Truncate very long values for readability
-                    if isinstance(value, str) and len(value) > 200:
-                        display_value = value[:200] + "..."
-                    else:
-                        display_value = value
-                    self.logger.info(f"- {key}: {display_value}")
+                result = await server.call_tool(mcp_tool_name, tool_arguments)
+                # Continue to logging section instead of returning directly
             else:
-                self.logger.info("Params: None")
-            
-            # Perform safety checks
-            safety_checks = self._perform_safety_checks(tool, tool_arguments)
-            
-            # Check if any safety checks failed
-            failed_checks = [check for check in safety_checks if not check.passed]
-            if failed_checks:
-                critical_failures = [check for check in failed_checks if check.severity == "error"]
-                if critical_failures:
-                    error_msg = f"Safety check failed: {critical_failures[0].message}"
-                    self.logger.error(f"Output: {error_msg}")
-                    return ToolResult(
-                        tool_name=tool_name,
-                        success=False,
-                        error=error_msg,
-                        safety_checks=safety_checks
-                    )
-            
-            # Set tool context for @tool functions
-            from .decorator import set_tool_context, clear_tool_context, ToolContext
-            context = ToolContext(working_directory=self.working_directory, tool_manager=self)
-            set_tool_context(context)
-            
+                result = ToolResult(
+                    tool_name=tool_name,
+                    success=False,
+                    error=f"MCP server '{server_name}' not found"
+                )
+        else:
+            # Get tool from registry
+            tool = self.registry.get_tool(tool_name)
+            if not tool:
+                return ToolResult(
+                    tool_name=tool_name,
+                    success=False,
+                    error=f"Tool '{tool_name}' not found"
+                )
+
+            # Update execution stats
+            if tool_name not in self.execution_stats:
+                self.execution_stats[tool_name] = {
+                    "total_calls": 0,
+                    "successful_calls": 0,
+                    "failed_calls": 0,
+                    "total_execution_time": 0.0,
+                    "average_execution_time": 0.0
+                }
+
+            self.execution_stats[tool_name]["total_calls"] += 1
+
             try:
-                # Execute the tool
-                result = await tool.execute(**tool_arguments)
-            finally:
-                # Always clear context after execution
-                clear_tool_context()
-            
-            # Normalize paths in the result
-            if result.success and result.result:
-                result.result = self._normalize_paths_in_result(result.result)
-            
-            # Update execution time and stats
-            execution_time = time.time() - start_time
-            result.execution_time = execution_time
-            result.safety_checks = safety_checks
-            
-            # Update success stats
-            if result.success:
-                self.execution_stats[tool_name]["successful_calls"] += 1
-            else:
+                # Perform safety checks
+                safety_checks = self._perform_safety_checks(tool, tool_arguments)
+
+                # Check if any safety checks failed
+                failed_checks = [check for check in safety_checks if not check.passed]
+                if failed_checks:
+                    critical_failures = [check for check in failed_checks if check.severity == "error"]
+                    if critical_failures:
+                        error_msg = f"Safety check failed: {critical_failures[0].message}"
+                        self.logger.error(f"Output: {error_msg}")
+                        return ToolResult(
+                            tool_name=tool_name,
+                            success=False,
+                            error=error_msg,
+                            safety_checks=safety_checks
+                        )
+
+                # Set tool context for @tool functions
+                from .decorator import set_tool_context, clear_tool_context, ToolContext
+                context = ToolContext(working_directory=self.working_directory, tool_manager=self)
+                set_tool_context(context)
+
+                try:
+                    # Execute the tool
+                    result = await tool.execute(**tool_arguments)
+                finally:
+                    # Always clear context after execution
+                    clear_tool_context()
+
+                # Normalize paths in the result
+                if result.success and result.result:
+                    result.result = self._normalize_paths_in_result(result.result)
+
+                # Update execution time and stats
+                execution_time = time.time() - start_time
+                result.execution_time = execution_time
+                result.safety_checks = safety_checks
+
+                # Update success stats
+                if result.success:
+                    self.execution_stats[tool_name]["successful_calls"] += 1
+                else:
+                    self.execution_stats[tool_name]["failed_calls"] += 1
+
+                self.execution_stats[tool_name]["total_execution_time"] += execution_time
+
+                # Update average execution time
+                total_calls = self.execution_stats[tool_name]["total_calls"]
+                total_time = self.execution_stats[tool_name]["total_execution_time"]
+                self.execution_stats[tool_name]["average_execution_time"] = total_time / total_calls
+
+            except Exception as e:
+                execution_time = time.time() - start_time
                 self.execution_stats[tool_name]["failed_calls"] += 1
-            
-            self.execution_stats[tool_name]["total_execution_time"] += execution_time
-            
-            # Update average execution time
-            total_calls = self.execution_stats[tool_name]["total_calls"]
-            total_time = self.execution_stats[tool_name]["total_execution_time"]
-            self.execution_stats[tool_name]["average_execution_time"] = total_time / total_calls
-            
-            # Log result
-            if result.success:
-                self.logger.info(f"Output: Tool executed successfully")
+                self.execution_stats[tool_name]["total_execution_time"] += execution_time
+
+                error_msg = str(e)
+                self.logger.error(f"Tool execution failed for '{tool_name}': {error_msg}")
+                self.logger.error(f"Output: {error_msg}")
+                return ToolResult(
+                    tool_name=tool_name,
+                    success=False,
+                    error=error_msg,
+                    execution_time=execution_time
+                )
+
+        # Log result (common for both MCP and regular tools)
+        if result.success:
+            if result.result is not None:
+                # Convert result to string and truncate if too long
+                result_str = str(result.result)
+                if len(result_str) > 500:
+                    display_result = result_str[:500] + "..."
+                else:
+                    display_result = result_str
+                self.logger.info(f"Output: {display_result}")
             else:
-                self.logger.error(f"Output: {result.error}")
-            
-            return result
-            
-        except Exception as e:
-            execution_time = time.time() - start_time
-            self.execution_stats[tool_name]["failed_calls"] += 1
-            self.execution_stats[tool_name]["total_execution_time"] += execution_time
-            
-            error_msg = str(e)
-            self.logger.error(f"Tool execution failed for '{tool_name}': {error_msg}")
-            self.logger.error(f"Output: {error_msg}")
-            return ToolResult(
-                tool_name=tool_name,
-                success=False,
-                error=error_msg,
-                execution_time=execution_time
-            )
+                self.logger.info(f"Output: Tool executed successfully (no result)")
+        else:
+            self.logger.error(f"Output: {result.error}")
+        
+        return result
     
     def _perform_safety_checks(self, tool: Union[BaseTool, SimpleTool], arguments: Dict[str, Any]) -> List[SafetyCheck]:
         """Perform safety checks for a tool."""
