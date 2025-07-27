@@ -227,8 +227,21 @@ class LLMClient:
                 # Check if this is a timeout error and log response body
                 if self._is_timeout_error(e, error_msg):
                     response_body, status_code = self._extract_timeout_response_body(e)
-                    self.logger.error(f"LiteLLM timeout error (attempt {attempt + 1}/{max_retries + 1}): {error_msg}, Status Code: {status_code}")
-                    self.logger.error(f"Timeout response body: {response_body}")
+                    
+                    # Determine timeout type for better diagnostics
+                    timeout_type = self._determine_timeout_type(e, error_msg)
+                    
+                    self.logger.error(f"LiteLLM timeout error (attempt {attempt + 1}/{max_retries + 1}): {error_msg}")
+                    self.logger.error(f"Timeout type: {timeout_type}")
+                    self.logger.error(f"HTTP Status Code: {status_code}")
+                    self.logger.error(f"Response body: {response_body}")
+                    self.logger.error(f"Configured timeout: {self.config.timeout} seconds ({self.config.timeout/60:.1f} minutes)")
+                    
+                    # Additional diagnostic info
+                    if hasattr(e, '__class__'):
+                        self.logger.error(f"Exception type: {e.__class__.__name__}")
+                    if hasattr(e, 'response') and e.response and hasattr(e.response, 'headers'):
+                        self.logger.debug(f"Response headers: {dict(e.response.headers)}")
                 
                 # Enhanced logging for rate limit debugging
                 if self._is_rate_limit_error(error_msg, error_msg):
@@ -701,8 +714,21 @@ class LLMClient:
                 # Check if this is a timeout error and log response body
                 if self._is_timeout_error(e, error_msg):
                     response_body, status_code = self._extract_timeout_response_body(e)
-                    self.logger.error(f"LiteLLM timeout error in stream completion (attempt {attempt + 1}/{max_retries + 1}): {error_msg}, Status Code: {status_code}")
-                    self.logger.error(f"Timeout response body: {response_body}")
+                    
+                    # Determine timeout type for better diagnostics
+                    timeout_type = self._determine_timeout_type(e, error_msg)
+                    
+                    self.logger.error(f"LiteLLM timeout error in stream completion (attempt {attempt + 1}/{max_retries + 1}): {error_msg}")
+                    self.logger.error(f"Timeout type: {timeout_type}")
+                    self.logger.error(f"HTTP Status Code: {status_code}")
+                    self.logger.error(f"Response body: {response_body}")
+                    self.logger.error(f"Configured timeout: {self.config.timeout} seconds ({self.config.timeout/60:.1f} minutes)")
+                    
+                    # Additional diagnostic info
+                    if hasattr(e, '__class__'):
+                        self.logger.error(f"Exception type: {e.__class__.__name__}")
+                    if hasattr(e, 'response') and e.response and hasattr(e.response, 'headers'):
+                        self.logger.debug(f"Response headers: {dict(e.response.headers)}")
                 
                 # Enhanced logging for rate limit debugging
                 if self._is_rate_limit_error(error_msg, error_msg):
@@ -928,10 +954,67 @@ class LLMClient:
         
         return False
     
+    def _determine_timeout_type(self, exception: Exception, error_msg: str) -> str:
+        """Determine the specific type of timeout for better diagnostics."""
+        error_lower = error_msg.lower()
+        
+        # Check for specific timeout types based on error message
+        if "connection timeout" in error_lower or "connect timeout" in error_lower:
+            return "Connection Timeout (failed to establish connection)"
+        elif "read timeout" in error_lower:
+            return "Read Timeout (connection established but no response received)"
+        elif "gateway timeout" in error_lower or "504" in error_msg:
+            return "Gateway Timeout (upstream server timeout)"
+        elif "request timeout" in error_lower or "408" in error_msg:
+            return "Request Timeout (server-side timeout)"
+        
+        # Check for specific exception types
+        if hasattr(exception, '__class__'):
+            exception_name = exception.__class__.__name__.lower()
+            
+            if isinstance(exception, asyncio.TimeoutError):
+                return "AsyncIO Timeout (client-side timeout)"
+            
+            try:
+                import requests
+                if isinstance(exception, requests.exceptions.ConnectTimeout):
+                    return "Requests Connect Timeout (failed to establish connection)"
+                elif isinstance(exception, requests.exceptions.ReadTimeout):
+                    return "Requests Read Timeout (no response received)"
+                elif isinstance(exception, requests.exceptions.Timeout):
+                    return "Requests Timeout (general timeout)"
+            except ImportError:
+                pass
+                
+            try:
+                import httpx
+                if isinstance(exception, httpx.ConnectTimeout):
+                    return "HTTPX Connect Timeout (failed to establish connection)"
+                elif isinstance(exception, httpx.ReadTimeout):
+                    return "HTTPX Read Timeout (no response received)"
+                elif isinstance(exception, httpx.TimeoutException):
+                    return "HTTPX Timeout (general timeout)"
+            except ImportError:
+                pass
+                
+            if 'timeout' in exception_name:
+                return f"{exception_name} (exception-based timeout)"
+        
+        # Check if it's likely a litellm timeout
+        if "litellm" in error_lower or "request_timeout" in error_lower:
+            return "LiteLLM Request Timeout (configured timeout exceeded)"
+        
+        # Generic timeout
+        if any(pattern in error_lower for pattern in ["timeout", "timed out"]):
+            return "Generic Timeout (unspecified type)"
+        
+        return "Unknown Timeout Type"
+
     def _is_timeout_error(self, exception: Exception, error_msg: str) -> bool:
         """Check if an error is specifically a timeout error."""
         timeout_patterns = [
-            "timeout", "timed out", "connection timeout", "gateway timeout"
+            "timeout", "timed out", "connection timeout", "gateway timeout",
+            "read timeout", "connect timeout", "request timeout"
         ]
         
         error_lower = error_msg.lower()
@@ -946,6 +1029,26 @@ class LLMClient:
             exception_name = exception.__class__.__name__.lower()
             if 'timeout' in exception_name:
                 return True
+        
+        # Check for asyncio timeout errors
+        if isinstance(exception, asyncio.TimeoutError):
+            return True
+            
+        # Check for requests timeout errors
+        try:
+            import requests
+            if isinstance(exception, requests.exceptions.Timeout):
+                return True
+        except ImportError:
+            pass
+            
+        # Check for httpx timeout errors
+        try:
+            import httpx
+            if isinstance(exception, (httpx.TimeoutException, httpx.ConnectTimeout, httpx.ReadTimeout)):
+                return True
+        except ImportError:
+            pass
         
         return False
     
