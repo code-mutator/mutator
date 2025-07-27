@@ -444,7 +444,7 @@ class TaskExecutor:
             execution_events = []
             iteration_count = 0
             
-            # Wrap workflow execution with timeout
+            # Wrap workflow execution with timeout using asyncio.wait_for for Python 3.8+ compatibility
             try:
                 # Stream through the workflow with timeout and shutdown checks
                 async def process_workflow_with_shutdown_checks():
@@ -505,76 +505,83 @@ class TaskExecutor:
                         raise workflow_error
                 
                 # Execute workflow with timeout and process events as they come
-                async with asyncio.timeout(task_timeout):
-                    async for event in process_workflow_with_shutdown_checks():
-                        # Check if this is already an AgentEvent (from shutdown or error)
-                        if isinstance(event, AgentEvent):
-                            yield event
-                            if event.event_type == "task_failed" and event.data.get("shutdown_requested"):
-                                raise KeyboardInterrupt("Task execution interrupted by shutdown request")
+                # Create a timeout task that will cancel the workflow if it takes too long
+                start_time = asyncio.get_event_loop().time()
+                
+                async for event in process_workflow_with_shutdown_checks():
+                    # Check timeout manually since asyncio.timeout is not available in Python 3.8
+                    current_time = asyncio.get_event_loop().time()
+                    if current_time - start_time > task_timeout:
+                        raise asyncio.TimeoutError(f"Task execution timed out after {task_timeout} seconds")
+                    
+                    # Check if this is already an AgentEvent (from shutdown or error)
+                    if isinstance(event, AgentEvent):
+                        yield event
+                        if event.event_type == "task_failed" and event.data.get("shutdown_requested"):
+                            raise KeyboardInterrupt("Task execution interrupted by shutdown request")
+                        continue
+                    
+                    # Process the raw workflow event
+                    try:
+                        # Extract agent node information if available
+                        agent_data = event.get("agent", {})
+                        if not agent_data:
                             continue
                         
-                        # Process the raw workflow event
-                        try:
-                            # Extract agent node information if available
-                            agent_data = event.get("agent", {})
-                            if not agent_data:
-                                continue
-                            
-                            # Get messages from agent data
-                            messages = agent_data.get("messages", [])
-                            if not messages:
-                                continue
-                            
-                            # Process the latest message
-                            latest_message = messages[-1] if messages else None
-                            if not latest_message:
-                                continue
-                            
-                            # Handle different message types
-                            message_content = getattr(latest_message, 'content', '') or ''
-                            tool_calls = getattr(latest_message, 'tool_calls', []) or []
-                            
-                            # Check if this is a tool call message
-                            if tool_calls:
-                                # Emit tool call events
-                                for tool_call in tool_calls:
-                                    tool_name = tool_call.get('name', 'unknown') if isinstance(tool_call, dict) else getattr(tool_call, 'name', 'unknown')
-                                    tool_args = tool_call.get('args', {}) if isinstance(tool_call, dict) else getattr(tool_call, 'args', {})
-                                    
-                                    tool_event = AgentEvent(
-                                        event_type="tool_call_started",
-                                        data={
-                                            "tool_name": tool_name,
-                                            "parameters": tool_args,
-                                            "iteration_count": iteration_count
-                                        }
-                                    )
-                                    yield tool_event
-                            
-                            # Handle regular content
-                            if message_content and message_content.strip():
-                                final_content = message_content
+                        # Get messages from agent data
+                        messages = agent_data.get("messages", [])
+                        if not messages:
+                            continue
+                        
+                        # Process the latest message
+                        latest_message = messages[-1] if messages else None
+                        if not latest_message:
+                            continue
+                        
+                        # Handle different message types
+                        message_content = getattr(latest_message, 'content', '') or ''
+                        tool_calls = getattr(latest_message, 'tool_calls', []) or []
+                        
+                        # Check if this is a tool call message
+                        if tool_calls:
+                            # Emit tool call events
+                            for tool_call in tool_calls:
+                                tool_name = tool_call.get('name', 'unknown') if isinstance(tool_call, dict) else getattr(tool_call, 'name', 'unknown')
+                                tool_args = tool_call.get('args', {}) if isinstance(tool_call, dict) else getattr(tool_call, 'args', {})
                                 
-                                # Emit LLM response event
-                                response_event = AgentEvent(
-                                    event_type="llm_response",
+                                tool_event = AgentEvent(
+                                    event_type="tool_call_started",
                                     data={
-                                        "content": message_content,
-                                        "has_tool_calls": bool(tool_calls),
-                                        "tool_call_count": len(tool_calls) if tool_calls else 0,
+                                        "tool_name": tool_name,
+                                        "parameters": tool_args,
                                         "iteration_count": iteration_count
                                     }
                                 )
-                                yield response_event
+                                yield tool_event
                         
-                        except Exception as event_error:
-                            self.logger.warning(f"Error processing workflow event: {event_error}")
-                            if self.debug_mode:
-                                self.logger.debug(f"Event that caused error: {event}")
-                            continue
+                        # Handle regular content
+                        if message_content and message_content.strip():
+                            final_content = message_content
+                            
+                            # Emit LLM response event
+                            response_event = AgentEvent(
+                                event_type="llm_response",
+                                data={
+                                    "content": message_content,
+                                    "has_tool_calls": bool(tool_calls),
+                                    "tool_call_count": len(tool_calls) if tool_calls else 0,
+                                    "iteration_count": iteration_count
+                                }
+                            )
+                            yield response_event
+                    
+                    except Exception as event_error:
+                        self.logger.warning(f"Error processing workflow event: {event_error}")
+                        if self.debug_mode:
+                            self.logger.debug(f"Event that caused error: {event}")
+                        continue
                 
-            except TimeoutError:
+            except asyncio.TimeoutError:
                 self.logger.error(f"Task execution timed out after {task_timeout} seconds")
                 timeout_event = AgentEvent(
                     event_type="task_failed",
@@ -586,7 +593,7 @@ class TaskExecutor:
                     }
                 )
                 yield timeout_event
-                raise TimeoutError(f"Task execution timed out after {task_timeout} seconds")
+                raise asyncio.TimeoutError(f"Task execution timed out after {task_timeout} seconds")
                 
             except Exception as workflow_error:
                 self.logger.error(f"Workflow execution failed: {str(workflow_error)}", exc_info=True)
@@ -719,7 +726,7 @@ class TaskExecutor:
             
             iteration_count = 0
             
-            # Wrap workflow execution with timeout
+            # Wrap workflow execution with timeout using asyncio.wait_for for Python 3.8+ compatibility
             try:
                 # Stream through the workflow with timeout and shutdown checks
                 async def process_chat_workflow_with_shutdown_checks():
@@ -761,82 +768,88 @@ class TaskExecutor:
                         yield output
                 
                 # Execute workflow with timeout and process outputs as they come
-                async with asyncio.timeout(chat_timeout):
-                    async for output in process_chat_workflow_with_shutdown_checks():
-                        # Process each output immediately
-                        for node_name, node_output in output.items():
-                            if node_name == "agent":
-                                # Agent response
-                                message = node_output["messages"][-1]
-                                has_tool_calls = self._has_tool_calls(message)
-                                tool_call_count = 0
+                # Create a timeout task that will cancel the workflow if it takes too long
+                start_time = asyncio.get_event_loop().time()
+                
+                async for output in process_chat_workflow_with_shutdown_checks():
+                    # Check timeout manually since asyncio.timeout is not available in Python 3.8
+                    current_time = asyncio.get_event_loop().time()
+                    if current_time - start_time > chat_timeout:
+                        raise asyncio.TimeoutError(f"Interactive chat timed out after {chat_timeout} seconds")
+                    # Process each output immediately
+                    for node_name, node_output in output.items():
+                        if node_name == "agent":
+                            # Agent response
+                            message = node_output["messages"][-1]
+                            has_tool_calls = self._has_tool_calls(message)
+                            tool_call_count = 0
+                            
+                            if has_tool_calls:
+                                # Extract and track tool calls
+                                tool_calls = self._extract_tool_calls(message)
+                                tool_call_count = len(tool_calls)
                                 
-                                if has_tool_calls:
-                                    # Extract and track tool calls
-                                    tool_calls = self._extract_tool_calls(message)
-                                    tool_call_count = len(tool_calls)
+                                # Emit tool_call_started events and track them
+                                for tool_call in tool_calls:
+                                    start_time = time.time()
+                                    tool_call_tracker[tool_call.id or tool_call.call_id] = {
+                                        "tool_name": tool_call.name,
+                                        "start_time": start_time,
+                                        "parameters": tool_call.arguments
+                                    }
                                     
-                                    # Emit tool_call_started events and track them
-                                    for tool_call in tool_calls:
-                                        start_time = time.time()
-                                        tool_call_tracker[tool_call.id or tool_call.call_id] = {
-                                            "tool_name": tool_call.name,
-                                            "start_time": start_time,
-                                            "parameters": tool_call.arguments
-                                        }
-                                        
-                                        yield AgentEvent(
-                                            event_type="tool_call_started",
-                                            data={
-                                                "tool_name": tool_call.name,
-                                                "parameters": tool_call.arguments,
-                                                "call_id": tool_call.id or tool_call.call_id,
-                                                "iteration": iteration_count
-                                            }
-                                        )
-                                
-                                # Check if this is a final response (no tool calls)
-                                if not has_tool_calls and hasattr(message, 'content') and message.content:
                                     yield AgentEvent(
-                                        event_type="llm_response",
+                                        event_type="tool_call_started",
                                         data={
-                                            "content": message.content,
-                                            "finish_reason": "stop",
-                                            "model": self.config.llm_config.model,
+                                            "tool_name": tool_call.name,
+                                            "parameters": tool_call.arguments,
+                                            "call_id": tool_call.id or tool_call.call_id,
                                             "iteration": iteration_count
                                         }
                                     )
                             
-                            elif node_name == "tools":
-                                # Tool execution results
-                                messages = node_output["messages"]
-                                for message in messages:
-                                    if hasattr(message, 'tool_call_id') and message.tool_call_id in tool_call_tracker:
-                                        # Calculate execution time
-                                        tracker_info = tool_call_tracker[message.tool_call_id]
-                                        execution_time = time.time() - tracker_info["start_time"]
-                                        
-                                        # Determine success based on message content
-                                        success = not (hasattr(message, 'content') and 
-                                                     message.content and 
-                                                     'error' in str(message.content).lower())
-                                        
-                                        yield AgentEvent(
-                                            event_type="tool_call_completed",
-                                            data={
-                                                "tool_name": tracker_info["tool_name"],
-                                                "tool_call_id": message.tool_call_id,
-                                                "success": success,
-                                                "result": message.content if hasattr(message, 'content') else str(message),
-                                                "execution_time": execution_time,
-                                                "iteration": iteration_count
-                                            }
-                                        )
-                                        
-                                        # Remove from tracker
-                                        del tool_call_tracker[message.tool_call_id]
+                            # Check if this is a final response (no tool calls)
+                            if not has_tool_calls and hasattr(message, 'content') and message.content:
+                                yield AgentEvent(
+                                    event_type="llm_response",
+                                    data={
+                                        "content": message.content,
+                                        "finish_reason": "stop",
+                                        "model": self.config.llm_config.model,
+                                        "iteration": iteration_count
+                                    }
+                                )
                         
-            except TimeoutError:
+                        elif node_name == "tools":
+                            # Tool execution results
+                            messages = node_output["messages"]
+                            for message in messages:
+                                if hasattr(message, 'tool_call_id') and message.tool_call_id in tool_call_tracker:
+                                    # Calculate execution time
+                                    tracker_info = tool_call_tracker[message.tool_call_id]
+                                    execution_time = time.time() - tracker_info["start_time"]
+                                    
+                                    # Determine success based on message content
+                                    success = not (hasattr(message, 'content') and 
+                                                 message.content and 
+                                                 'error' in str(message.content).lower())
+                                    
+                                    yield AgentEvent(
+                                        event_type="tool_call_completed",
+                                        data={
+                                            "tool_name": tracker_info["tool_name"],
+                                            "tool_call_id": message.tool_call_id,
+                                            "success": success,
+                                            "result": message.content if hasattr(message, 'content') else str(message),
+                                            "execution_time": execution_time,
+                                            "iteration": iteration_count
+                                        }
+                                    )
+                                    
+                                    # Remove from tracker
+                                    del tool_call_tracker[message.tool_call_id]
+                        
+            except asyncio.TimeoutError:
                 self.logger.error(f"Interactive chat timed out after {chat_timeout} seconds")
                 timeout_event = AgentEvent(
                     event_type="task_failed",
@@ -847,11 +860,11 @@ class TaskExecutor:
                     }
                 )
                 yield timeout_event
-                raise TimeoutError(f"Interactive chat timed out after {chat_timeout} seconds")
+                raise asyncio.TimeoutError(f"Interactive chat timed out after {chat_timeout} seconds")
                 
             except Exception as workflow_error:
                 # Don't catch TimeoutError here - let it bubble up
-                if isinstance(workflow_error, TimeoutError):
+                if isinstance(workflow_error, asyncio.TimeoutError):
                     raise workflow_error
                     
                 self.logger.error(f"Interactive chat workflow failed: {str(workflow_error)}", exc_info=True)
@@ -892,7 +905,7 @@ class TaskExecutor:
 
         except Exception as e:
             # Don't catch TimeoutError here - let it bubble up for proper test handling
-            if isinstance(e, TimeoutError):
+            if isinstance(e, asyncio.TimeoutError):
                 raise e
                 
             self.logger.error(f"Interactive chat failed: {str(e)}", exc_info=True)
