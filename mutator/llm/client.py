@@ -226,8 +226,8 @@ class LLMClient:
                 
                 # Check if this is a timeout error and log response body
                 if self._is_timeout_error(e, error_msg):
-                    response_body = self._extract_timeout_response_body(e)
-                    self.logger.error(f"LiteLLM timeout error (attempt {attempt + 1}/{max_retries + 1}): {error_msg}")
+                    response_body, status_code = self._extract_timeout_response_body(e)
+                    self.logger.error(f"LiteLLM timeout error (attempt {attempt + 1}/{max_retries + 1}): {error_msg}, Status Code: {status_code}")
                     self.logger.error(f"Timeout response body: {response_body}")
                 
                 # Enhanced logging for rate limit debugging
@@ -700,8 +700,8 @@ class LLMClient:
                 
                 # Check if this is a timeout error and log response body
                 if self._is_timeout_error(e, error_msg):
-                    response_body = self._extract_timeout_response_body(e)
-                    self.logger.error(f"LiteLLM timeout error in stream completion (attempt {attempt + 1}/{max_retries + 1}): {error_msg}")
+                    response_body, status_code = self._extract_timeout_response_body(e)
+                    self.logger.error(f"LiteLLM timeout error in stream completion (attempt {attempt + 1}/{max_retries + 1}): {error_msg}, Status Code: {status_code}")
                     self.logger.error(f"Timeout response body: {response_body}")
                 
                 # Enhanced logging for rate limit debugging
@@ -949,14 +949,23 @@ class LLMClient:
         
         return False
     
-    def _extract_timeout_response_body(self, exception: Exception) -> str:
-        """Extract response body from timeout exception if available."""
+    def _extract_timeout_response_body(self, exception: Exception) -> tuple[str, Optional[int]]:
+        """Extract response body and HTTP status code from timeout exception if available."""
         response_body = "No response body available"
+        status_code = None
         
         try:
             # Try to get response body from various exception attributes
             if hasattr(exception, 'response') and exception.response:
                 response = exception.response
+                
+                # Extract status code if available
+                if hasattr(response, 'status_code'):
+                    status_code = response.status_code
+                elif hasattr(response, 'status'):
+                    status_code = response.status
+                
+                # Extract response body
                 if hasattr(response, 'text'):
                     response_body = response.text
                 elif hasattr(response, 'content'):
@@ -976,12 +985,18 @@ class LLMClient:
             # Try to get response from OpenAI-style exceptions
             elif hasattr(exception, 'body') and exception.body:
                 response_body = str(exception.body)
+                # Try to extract status code from OpenAI-style exceptions
+                if hasattr(exception, 'status_code'):
+                    status_code = exception.status_code
             
             # Try to get response from requests-style exceptions
             elif hasattr(exception, 'args') and exception.args:
                 for arg in exception.args:
-                    if isinstance(arg, dict) and ('response' in arg or 'body' in arg):
-                        response_body = str(arg)
+                    if isinstance(arg, dict):
+                        if 'response' in arg or 'body' in arg:
+                            response_body = str(arg)
+                        if 'status_code' in arg:
+                            status_code = arg['status_code']
                         break
             
             # Fallback: try to extract any JSON-like content from the error message
@@ -994,7 +1009,7 @@ class LLMClient:
             self.logger.debug(f"Failed to extract response body from timeout exception: {e}")
             response_body = f"Failed to extract response body: {str(e)}"
         
-        return response_body
+        return response_body, status_code
     
     def _build_messages(self, user_message: str, system_message: Optional[str] = None, include_history: bool = True) -> List[Dict[str, Any]]:
         """Build messages list for completion."""
