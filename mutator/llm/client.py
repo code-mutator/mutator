@@ -242,6 +242,12 @@ class LLMClient:
                         self.logger.error(f"Exception type: {e.__class__.__name__}")
                     if hasattr(e, 'response') and e.response and hasattr(e.response, 'headers'):
                         self.logger.debug(f"Response headers: {dict(e.response.headers)}")
+                    
+                    # Log comprehensive exception details
+                    self._log_exception_details(e)
+                    
+                    # Add troubleshooting hints based on timeout type
+                    self._log_timeout_troubleshooting_hints(timeout_type)
                 
                 # Enhanced logging for rate limit debugging
                 if self._is_rate_limit_error(error_msg, error_msg):
@@ -729,6 +735,12 @@ class LLMClient:
                         self.logger.error(f"Exception type: {e.__class__.__name__}")
                     if hasattr(e, 'response') and e.response and hasattr(e.response, 'headers'):
                         self.logger.debug(f"Response headers: {dict(e.response.headers)}")
+                    
+                    # Log comprehensive exception details
+                    self._log_exception_details(e)
+                    
+                    # Add troubleshooting hints based on timeout type
+                    self._log_timeout_troubleshooting_hints(timeout_type)
                 
                 # Enhanced logging for rate limit debugging
                 if self._is_rate_limit_error(error_msg, error_msg):
@@ -958,17 +970,7 @@ class LLMClient:
         """Determine the specific type of timeout for better diagnostics."""
         error_lower = error_msg.lower()
         
-        # Check for specific timeout types based on error message
-        if "connection timeout" in error_lower or "connect timeout" in error_lower:
-            return "Connection Timeout (failed to establish connection)"
-        elif "read timeout" in error_lower:
-            return "Read Timeout (connection established but no response received)"
-        elif "gateway timeout" in error_lower or "504" in error_msg:
-            return "Gateway Timeout (upstream server timeout)"
-        elif "request timeout" in error_lower or "408" in error_msg:
-            return "Request Timeout (server-side timeout)"
-        
-        # Check for specific exception types
+        # Check for specific exception types first (more reliable than string matching)
         if hasattr(exception, '__class__'):
             exception_name = exception.__class__.__name__.lower()
             
@@ -996,15 +998,33 @@ class LLMClient:
                     return "HTTPX Timeout (general timeout)"
             except ImportError:
                 pass
-                
-            if 'timeout' in exception_name:
-                return f"{exception_name} (exception-based timeout)"
+        
+        # Check for specific timeout types based on error message patterns
+        # Order matters - check more specific patterns first
+        if "connection timeout" in error_lower or "connect timeout" in error_lower:
+            return "Connection Timeout (failed to establish connection)"
+        elif "read timeout" in error_lower:
+            return "Read Timeout (connection established but no response received)"
+        elif "gateway timeout" in error_lower or "504" in error_msg:
+            return "Gateway Timeout (upstream server timeout)"
+        elif "request timeout" in error_lower or "408" in error_msg:
+            return "Request Timeout (server-side timeout)"
         
         # Check if it's likely a litellm timeout
-        if "litellm" in error_lower or "request_timeout" in error_lower:
-            return "LiteLLM Request Timeout (configured timeout exceeded)"
+        if "litellm" in error_lower:
+            # More specific LiteLLM timeout detection
+            if "request_timeout" in error_lower or "timeout" in error_lower:
+                return "LiteLLM Request Timeout (configured timeout exceeded)"
+            else:
+                return "LiteLLM Timeout (internal timeout)"
         
-        # Generic timeout
+        # Check for exception name patterns
+        if hasattr(exception, '__class__'):
+            exception_name = exception.__class__.__name__.lower()
+            if 'timeout' in exception_name:
+                return f"{exception.__class__.__name__} (exception-based timeout)"
+        
+        # Generic timeout patterns
         if any(pattern in error_lower for pattern in ["timeout", "timed out"]):
             return "Generic Timeout (unspecified type)"
         
@@ -1112,8 +1132,183 @@ class LLMClient:
             self.logger.debug(f"Failed to extract response body from timeout exception: {e}")
             response_body = f"Failed to extract response body: {str(e)}"
         
+        # If no response body was found, provide context about why
+        if response_body == "No response body available":
+            timeout_type = self._determine_timeout_type(exception, str(exception))
+            if "AsyncIO Timeout" in timeout_type or "client-side" in timeout_type:
+                response_body = "No response body available (client-side timeout - no HTTP response received)"
+            elif "Connect Timeout" in timeout_type or "connection" in timeout_type:
+                response_body = "No response body available (connection timeout - failed to establish connection)"
+            elif "LiteLLM" in timeout_type or "Request Timeout" in timeout_type:
+                response_body = "No response body available (timeout occurred before server response)"
+            else:
+                response_body = "No response body available (timeout occurred before HTTP response)"
+        
         return response_body, status_code
-    
+
+    def _log_timeout_troubleshooting_hints(self, timeout_type: str) -> None:
+        """Log troubleshooting hints based on the timeout type."""
+        
+        if "client-side" in timeout_type or "AsyncIO" in timeout_type:
+            self.logger.info("Troubleshooting hint: Client-side timeout suggests:")
+            self.logger.info("  • Network connectivity issues")
+            self.logger.info("  • Consider increasing the timeout value")
+            self.logger.info("  • Check if the LLM provider is experiencing issues")
+            
+        elif "Connect Timeout" in timeout_type or "connection" in timeout_type:
+            self.logger.info("Troubleshooting hint: Connection timeout suggests:")
+            self.logger.info("  • Unable to establish connection to the LLM provider")
+            self.logger.info("  • Check network connectivity and DNS resolution")
+            self.logger.info("  • Verify the provider's base URL and endpoints")
+            self.logger.info("  • Consider checking firewall or proxy settings")
+            
+        elif "Read Timeout" in timeout_type:
+            self.logger.info("Troubleshooting hint: Read timeout suggests:")
+            self.logger.info("  • Connection established but no response received")
+            self.logger.info("  • The LLM provider may be overloaded")
+            self.logger.info("  • Consider using a smaller model or reducing max_tokens")
+            self.logger.info("  • Increase the timeout for complex requests")
+            
+        elif "Request Timeout" in timeout_type or "server-side" in timeout_type:
+            self.logger.info("Troubleshooting hint: Server-side timeout suggests:")
+            self.logger.info("  • The request took too long for the server to process")
+            self.logger.info("  • Consider reducing request complexity (shorter prompts, fewer tools)")
+            self.logger.info("  • Try using a faster model if available")
+            self.logger.info("  • Increase timeout if processing complex tasks")
+            
+        elif "Gateway Timeout" in timeout_type:
+            self.logger.info("Troubleshooting hint: Gateway timeout (504) suggests:")
+            self.logger.info("  • Upstream server (LLM provider) is not responding")
+            self.logger.info("  • This is typically a temporary issue")
+            self.logger.info("  • Retry the request after a short delay")
+            self.logger.info("  • Check the provider's status page for ongoing issues")
+            
+        elif "LiteLLM" in timeout_type:
+            self.logger.info("Troubleshooting hint: LiteLLM timeout suggests:")
+            self.logger.info("  • Internal LiteLLM processing timeout")
+            self.logger.info("  • Consider increasing the timeout configuration")
+            self.logger.info("  • Check if request parameters are causing delays")
+            
+        else:
+            self.logger.info("Troubleshooting hint: General timeout suggestions:")
+            self.logger.info("  • Increase timeout configuration if requests are legitimately slow")
+            self.logger.info("  • Check network connectivity to the LLM provider")
+            self.logger.info("  • Consider using a different model or provider")
+            self.logger.info("  • Monitor provider status for ongoing issues")
+        
+        # Always provide general guidance
+        self.logger.info(f"Current timeout setting: {self.config.timeout}s - adjust via LLMConfig(timeout=X)")
+        
+        # Check if timeout is unusually high and suggest review
+        if self.config.timeout > 300:  # 5 minutes
+            self.logger.warning(f"Note: Timeout is set to {self.config.timeout}s ({self.config.timeout/60:.1f} minutes)")
+            self.logger.warning("Consider if such a long timeout is necessary for your use case")
+
+    def _log_exception_details(self, exception: Exception) -> None:
+        """Log comprehensive exception details for debugging."""
+        import traceback
+        
+        self.logger.error("=== Exception Details ===")
+        
+        # Basic exception info
+        self.logger.error(f"Exception class: {exception.__class__.__module__}.{exception.__class__.__name__}")
+        self.logger.error(f"Exception message: {str(exception)}")
+        
+        # Exception arguments
+        if hasattr(exception, 'args') and exception.args:
+            self.logger.error(f"Exception args: {exception.args}")
+        
+        # Exception attributes
+        exception_attrs = []
+        for attr in dir(exception):
+            if not attr.startswith('_') and attr not in ['args', 'with_traceback']:
+                try:
+                    value = getattr(exception, attr)
+                    if not callable(value):
+                        exception_attrs.append(f"{attr}={repr(value)}")
+                except Exception:
+                    exception_attrs.append(f"{attr}=<unable to access>")
+        
+        if exception_attrs:
+            self.logger.error(f"Exception attributes: {', '.join(exception_attrs)}")
+        
+        # Stack trace
+        if hasattr(exception, '__traceback__') and exception.__traceback__:
+            self.logger.error("Exception traceback:")
+            tb_lines = traceback.format_exception(type(exception), exception, exception.__traceback__)
+            for line in tb_lines:
+                for sub_line in line.rstrip().split('\n'):
+                    if sub_line.strip():
+                        self.logger.error(f"  {sub_line}")
+        
+        # Special handling for common exception types
+        if hasattr(exception, 'response') and exception.response:
+            response = exception.response
+            self.logger.error("=== HTTP Response Details ===")
+            
+            # Response status
+            if hasattr(response, 'status_code'):
+                self.logger.error(f"Response status code: {response.status_code}")
+            elif hasattr(response, 'status'):
+                self.logger.error(f"Response status: {response.status}")
+            
+            # Response headers
+            if hasattr(response, 'headers'):
+                try:
+                    headers = dict(response.headers)
+                    self.logger.error(f"Response headers: {headers}")
+                except Exception as e:
+                    self.logger.error(f"Response headers (failed to parse): {e}")
+            
+            # Response URL
+            if hasattr(response, 'url'):
+                self.logger.error(f"Response URL: {response.url}")
+            
+            # Response content (truncated)
+            if hasattr(response, 'text'):
+                try:
+                    text = response.text
+                    if len(text) > 500:
+                        text = text[:500] + "... (truncated)"
+                    self.logger.error(f"Response text: {text}")
+                except Exception as e:
+                    self.logger.error(f"Response text (failed to read): {e}")
+            elif hasattr(response, 'content'):
+                try:
+                    content = response.content
+                    if isinstance(content, bytes):
+                        if len(content) > 500:
+                            content = content[:500] + b"... (truncated)"
+                        content_str = content.decode('utf-8', errors='ignore')
+                    else:
+                        content_str = str(content)
+                        if len(content_str) > 500:
+                            content_str = content_str[:500] + "... (truncated)"
+                    self.logger.error(f"Response content: {content_str}")
+                except Exception as e:
+                    self.logger.error(f"Response content (failed to read): {e}")
+        
+        # Additional context for specific exception types
+        if 'requests' in str(type(exception)):
+            self.logger.error("=== Requests Library Context ===")
+            if hasattr(exception, 'request') and exception.request:
+                request = exception.request
+                if hasattr(request, 'method'):
+                    self.logger.error(f"Request method: {request.method}")
+                if hasattr(request, 'url'):
+                    self.logger.error(f"Request URL: {request.url}")
+                if hasattr(request, 'headers'):
+                    # Don't log sensitive headers
+                    safe_headers = {}
+                    for k, v in dict(request.headers).items():
+                        if k.lower() in ['authorization', 'api-key', 'x-api-key']:
+                            safe_headers[k] = '<redacted>'
+                        else:
+                            safe_headers[k] = v
+                    self.logger.error(f"Request headers: {safe_headers}")
+        
+        self.logger.error("=== End Exception Details ===")
+
     def _build_messages(self, user_message: str, system_message: Optional[str] = None, include_history: bool = True) -> List[Dict[str, Any]]:
         """Build messages list for completion."""
         messages = []
